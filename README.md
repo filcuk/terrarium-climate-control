@@ -5,7 +5,7 @@ MicroPython controller that runs a fan on a schedule, with a push button and a s
 - **Schedule:** the fan runs for a set time at the start of every cycle. By default it runs 5 minutes every hour.
 - **Button:** if the fan is on, it stops, and the scheduled run stays off until the next cycle. If the fan is off, it starts an on-demand run (5 minutes by default).
 - **Web page:** shows temperature, humidity, fan status, lets you edit the schedule, has a start/stop button that works like the physical one, and shows the last 100 log lines.
-- **Sensor:** ASAIR AM2302 / DHT22 for air temperature and relative humidity.
+- **Sensor:** 4-pin ASAIR AM2302 for air temperature and relative humidity.
 
 
 
@@ -15,6 +15,7 @@ MicroPython controller that runs a fan on a schedule, with a push button and a s
 | Function    | ESP32-C3 GPIO | Notes                                 |
 | ----------- | ------------- | ------------------------------------- |
 | Fan drive   | **GPIO5**     | HIGH = fan on (via transistor/MOSFET) |
+| Fan LED     | **GPIO5**     | 330 Ω series resistor; lit when the fan is on |
 | Button      | **GPIO4**     | Momentary to GND, internal pull-up    |
 | AM2302 data | **GPIO6**     | Temperature / humidity sensor         |
 
@@ -23,9 +24,9 @@ Change `FAN_GPIO` / `BTN_GPIO` / `DHT_GPIO` at the top of `main.py` if you need 
 
 ## Wiring
 
-![ESP32-C3 wiring diagram](docs/wiring.png)
+![ESP32-C3 wiring diagram](docs/wiring.svg)
 
-One USB cable powers both the board and the fan.
+One USB cable powers both the board and the fan. An LED on the GPIO5 control line lights while the fan is on.
 
 ### Parts
 
@@ -34,8 +35,12 @@ One USB cable powers both the board and the fan.
 - 2N2222 transistor
 - R1: 1 kΩ resistor (brown-black-red)
 - R2: 10 kΩ resistor (brown-black-orange)
+- R4: 330 Ω resistor (orange-orange-brown)
+- Indicator LED
 - 1N4007 diode. Any 1N4001–1N4007, 1N5819 or 1N4148 also works.
 - Momentary push button
+- ASAIR AM2302 (4-pin)
+- R3: 4.7 kΩ (yellow-violet-red) or 10 kΩ (brown-black-orange) pull-up
 
 
 
@@ -46,32 +51,27 @@ One USB cable powers both the board and the fan.
 3. **2N2222 emitter (E)** → **GND**
 4. **GPIO5** → **R1 (1 kΩ)** → **2N2222 base (B)**
 5. **2N2222 base (B)** → **R2 (10 kΩ)** → **GND**
-6. **Diode** across the fan: **striped end → fan +**, plain end → fan −
-7. **GPIO4** → **button** → **GND** (on a 4-leg button, use legs that are diagonally opposite)
-8. Wire the AM2302 (see below)
+6. **GPIO5** → **R4 (330 Ω)** → **LED anode** (long leg); **LED cathode** (short leg) → **GND**
+7. **Diode** across the fan: **striped end → fan +**, plain end → fan −
+8. **GPIO4** → **button** → **GND** (on a 4-leg button, use legs that are diagonally opposite)
+9. Wire the AM2302 (see below)
+
+R4 ties to GPIO5 on the board side of R1, the same signal that drives the transistor base. The LED lights only while the fan is on.
 
 Every GND connection goes to the same board GND pin.
 
-### AM2302 / DHT22 temperature & humidity
+### AM2302 temperature & humidity
 
 ![AM2302 wiring](docs/am2302-wiring.svg)
 
-This is an **air** temperature and humidity sensor (not soil moisture).
+This is a 4-pin air temperature and humidity sensor (plastic grille, four metal pins). The main wiring diagram shows it as well.
 
-**3-pin breakout module** (labelled VCC / DATA / GND, often already has a pull-up):
-
-```
-Board 3V3  ---------- AM2302 VCC
-GPIO6      ---------- AM2302 DATA
-Board GND  ---------- AM2302 GND
-```
-
-**Bare 4-pin AM2302** (plastic grille, four metal pins). With the grille facing you and the pins pointing down, left to right is usually:
+With the grille facing you and the pins pointing down, left to right is usually:
 
 ```
 1 VDD   ---------- Board 3V3
 2 DATA  ---------- GPIO6
-               \-- 4.7 kΩ or 10 kΩ to 3V3  (pull-up; required on bare sensors)
+               \-- R3: 4.7 kΩ or 10 kΩ to 3V3  (pull-up)
 3 NC    ---------- leave unconnected
 4 GND   ---------- Board GND
 ```
@@ -139,5 +139,12 @@ The web page has no password. Anyone on your network can open it.
 | Button or web button while fan off | On-demand run                                                |
 | On-demand run ends                 | Fan off until the next scheduled run or button press         |
 | Schedule saved on the web page     | Applies immediately and is kept after a reboot               |
+
+
+## Troubleshooting
+
+**Thonny shows `serial.serialutil.SerialTimeoutException: Write timeout`.** The controller is running and the serial port isn't answering. Press reset on the ESP32-C3, then press Stop in Thonny. After reset, `main.py` waits 3 seconds before the fan can start, and Stop has to land in that window so Thonny can interrupt and connect.
+
+If that still fails, hold the button while you press reset. That is safe mode: the controller doesn't start, and the board stays at the REPL.
 
 

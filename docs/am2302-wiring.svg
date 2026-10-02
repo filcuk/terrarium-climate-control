@@ -1,41 +1,62 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360" font-family="Helvetica, Arial, sans-serif">
-  <rect width="720" height="360" fill="#ffffff"/>
-  <text x="360" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#222">AM2302 / DHT22 wiring (ESP32-C3)</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 460" width="780" height="460" font-family="Helvetica, Arial, sans-serif">
+  <rect width="780" height="460" fill="#ffffff"/>
+  <text x="390" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#222">AM2302 4-pin wiring (ESP32-C3)</text>
 
-  <rect x="40" y="70" width="160" height="240" rx="12" fill="#1f3b5c"/>
-  <text x="120" y="185" text-anchor="middle" font-size="18" font-weight="bold" fill="#fff">ESP32-C3</text>
+  <rect x="36" y="58" width="170" height="320" rx="12" fill="#1f3b5c"/>
+  <text x="121" y="220" text-anchor="middle" font-size="18" font-weight="bold" fill="#fff">ESP32-C3</text>
   <g fill="#f2c94c" stroke="#333" stroke-width="1.5">
-    <circle cx="200" cy="120" r="6"/>
-    <circle cx="200" cy="190" r="6"/>
-    <circle cx="200" cy="260" r="6"/>
+    <circle cx="206" cy="110" r="6"/>
+    <circle cx="206" cy="180" r="6"/>
+    <circle cx="206" cy="320" r="6"/>
   </g>
   <g font-size="14" font-weight="bold" fill="#fff" text-anchor="end">
-    <text x="188" y="125">3V3</text>
-    <text x="188" y="195">GPIO6</text>
-    <text x="188" y="265">GND</text>
+    <text x="190" y="115">3V3</text>
+    <text x="190" y="185">GPIO6</text>
+    <text x="190" y="325">GND</text>
   </g>
 
-  <rect x="480" y="90" width="180" height="200" rx="14" fill="#e8f4ea" stroke="#2d6a4f" stroke-width="3"/>
-  <text x="570" y="130" text-anchor="middle" font-size="18" font-weight="bold" fill="#2d6a4f">AM2302</text>
-  <text x="570" y="152" text-anchor="middle" font-size="13" fill="#2d6a4f">temp + humidity</text>
+  <line x1="212" y1="110" x2="524" y2="110" stroke="#d62828" stroke-width="4"/>
+  <line x1="212" y1="180" x2="524" y2="180" stroke="#f08c00" stroke-width="4"/>
+  <line x1="212" y1="320" x2="524" y2="320" stroke="#111" stroke-width="4"/>
+
+  <circle cx="360" cy="110" r="5" fill="#d62828"/>
+  <line x1="360" y1="110" x2="360" y2="122" stroke="#d62828" stroke-width="4"/>
+  <polyline points="360,122 346,134 374,146 346,158 374,170 360,180" fill="none" stroke="#333" stroke-width="3"/>
+  <circle cx="360" cy="180" r="5" fill="#f08c00"/>
+  <rect x="301" y="196" width="118" height="26" rx="5" fill="#fff3d6" stroke="#f08c00"/>
+  <text x="360" y="214" text-anchor="middle" font-size="13" font-weight="bold" fill="#222">R3 = 4.7&#8211;10 k&#937;</text>
+
+  <text x="280" y="100" text-anchor="middle" font-size="13" fill="#d62828">3V3 power</text>
+  <text x="280" y="170" text-anchor="middle" font-size="13" fill="#b35c00">data</text>
+  <text x="360" y="308" text-anchor="middle" font-size="13" fill="#111">ground</text>
+
+  <rect x="530" y="70" width="210" height="300" rx="14" fill="#e8f4ea" stroke="#2d6a4f" stroke-width="3"/>
+  <text x="668" y="108" text-anchor="middle" font-size="18" font-weight="bold" fill="#2d6a4f">AM2302</text>
+  <text x="668" y="128" text-anchor="middle" font-size="13" fill="#2d6a4f">4-pin</text>
+  <rect x="620" y="148" width="96" height="150" rx="6" fill="#f4fff6" stroke="#2d6a4f" stroke-width="1.5"/>
+  <g stroke="#95d5b2" stroke-width="3">
+    <line x1="632" y1="168" x2="704" y2="168"/>
+    <line x1="632" y1="186" x2="704" y2="186"/>
+    <line x1="632" y1="204" x2="704" y2="204"/>
+    <line x1="632" y1="222" x2="704" y2="222"/>
+    <line x1="632" y1="240" x2="704" y2="240"/>
+    <line x1="632" y1="258" x2="704" y2="258"/>
+    <line x1="632" y1="276" x2="704" y2="276"/>
+  </g>
+
   <g fill="#fff" stroke="#333" stroke-width="1.5">
-    <circle cx="480" cy="190" r="6"/>
-    <circle cx="480" cy="230" r="6"/>
-    <circle cx="480" cy="270" r="6"/>
+    <circle cx="530" cy="110" r="6"/>
+    <circle cx="530" cy="180" r="6"/>
+    <circle cx="530" cy="250" r="6" fill="#ddd"/>
+    <circle cx="530" cy="320" r="6"/>
   </g>
   <g font-size="14" font-weight="bold" fill="#1b4332">
-    <text x="496" y="195">VCC</text>
-    <text x="496" y="235">DATA</text>
-    <text x="496" y="275">GND</text>
+    <text x="546" y="115">1  VDD</text>
+    <text x="546" y="185">2  DATA</text>
+    <text x="546" y="255" fill="#6c757d">3  NC</text>
+    <text x="546" y="325">4  GND</text>
   </g>
 
-  <line x1="206" y1="120" x2="474" y2="190" stroke="#d62828" stroke-width="4"/>
-  <line x1="206" y1="190" x2="474" y2="230" stroke="#f08c00" stroke-width="4"/>
-  <line x1="206" y1="260" x2="474" y2="270" stroke="#111" stroke-width="4"/>
-
-  <text x="340" y="145" text-anchor="middle" font-size="13" fill="#d62828">3V3 power</text>
-  <text x="340" y="210" text-anchor="middle" font-size="13" fill="#b35c00">data</text>
-  <text x="340" y="285" text-anchor="middle" font-size="13" fill="#111">ground</text>
-
-  <text x="360" y="340" text-anchor="middle" font-size="13" fill="#444">Bare 4-pin sensors also need a 4.7&#8211;10 k&#937; pull-up from DATA to 3V3</text>
+  <text x="390" y="418" text-anchor="middle" font-size="13" fill="#444">Grille facing you, pins down, left to right: 1 VDD, 2 DATA, 3 NC, 4 GND</text>
+  <text x="390" y="438" text-anchor="middle" font-size="13" fill="#444">Leave pin 3 open. Power the sensor from 3V3, not 5V.</text>
 </svg>

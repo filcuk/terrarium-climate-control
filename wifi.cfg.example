@@ -2,7 +2,7 @@
 ssid=YourNetworkName
 password=YourWifiPassword
 
-# Optional: name on the local network, opens as http://terrarium1.local/
+# Optional: name on the local network, opens as http://terrarium.local/
 # Letters, digits and hyphens only. Defaults to "terrarium".
 hostname=terrarium1
 
