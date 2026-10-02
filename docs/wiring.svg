@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 600" width="980" height="600" font-family="Helvetica, Arial, sans-serif">
+  <rect width="980" height="600" fill="#ffffff"/>
+
+  <text x="490" y="36" text-anchor="middle" font-size="22" font-weight="bold" fill="#222">Terrarium fan controller: ESP32-C3 wiring</text>
+
+  <!-- ESP32-C3 board -->
+  <rect x="40" y="70" width="180" height="420" rx="12" fill="#1f3b5c"/>
+  <text x="130" y="250" text-anchor="middle" font-size="20" font-weight="bold" fill="#fff">ESP32-C3</text>
+  <text x="130" y="276" text-anchor="middle" font-size="14" fill="#cfe0f5">powered by USB</text>
+
+  <g font-size="15" font-weight="bold" fill="#fff" text-anchor="end">
+    <text x="208" y="105">5V</text>
+    <text x="208" y="325">GPIO5</text>
+    <text x="208" y="405">GPIO4</text>
+    <text x="208" y="465">GND</text>
+  </g>
+  <g fill="#f2c94c" stroke="#333" stroke-width="1.5">
+    <circle cx="220" cy="100" r="6"/>
+    <circle cx="220" cy="320" r="6"/>
+    <circle cx="220" cy="400" r="6"/>
+    <circle cx="220" cy="460" r="6"/>
+  </g>
+
+  <!-- 5V rail (red) -->
+  <polyline points="226,100 860,100 860,165" fill="none" stroke="#d62828" stroke-width="4"/>
+  <line x1="760" y1="100" x2="760" y2="130" stroke="#d62828" stroke-width="4"/>
+
+  <!-- GND rail (black) -->
+  <polyline points="226,460 260,460 260,520 760,520" fill="none" stroke="#111" stroke-width="4"/>
+  <text x="500" y="545" text-anchor="middle" font-size="14" fill="#111">GND (all black wires join here)</text>
+
+  <!-- Fan -->
+  <circle cx="760" cy="170" r="40" fill="#e8f4ea" stroke="#2d6a4f" stroke-width="3"/>
+  <text x="760" y="166" text-anchor="middle" font-size="16" font-weight="bold" fill="#2d6a4f">FAN</text>
+  <text x="760" y="186" text-anchor="middle" font-size="13" fill="#2d6a4f">5V</text>
+  <text x="772" y="126" font-size="16" font-weight="bold" fill="#d62828">+</text>
+  <text x="772" y="226" font-size="18" font-weight="bold" fill="#111">&#8722;</text>
+
+  <!-- Fan &#8722; to collector node (grey) -->
+  <polyline points="760,210 760,295" fill="none" stroke="#666" stroke-width="4"/>
+  <polyline points="760,240 860,240 860,185" fill="none" stroke="#666" stroke-width="4"/>
+  <circle cx="760" cy="240" r="5" fill="#666"/>
+
+  <!-- Flyback diode (cathode bar at top, toward 5V) -->
+  <polygon points="848,187 872,187 860,167" fill="#444"/>
+  <line x1="846" y1="165" x2="874" y2="165" stroke="#444" stroke-width="4"/>
+  <text x="884" y="160" font-size="13" font-weight="bold" fill="#222">Diode</text>
+  <text x="884" y="176" font-size="12" fill="#444">1N4007</text>
+  <text x="884" y="192" font-size="12" fill="#d62828">stripe up</text>
+  <text x="884" y="206" font-size="12" fill="#d62828">(to 5V)</text>
+
+  <!-- 2N2222 transistor -->
+  <circle cx="742" cy="320" r="32" fill="#fff" stroke="#333" stroke-width="2.5"/>
+  <line x1="726" y1="300" x2="726" y2="340" stroke="#333" stroke-width="4"/>
+  <line x1="726" y1="310" x2="760" y2="295" stroke="#333" stroke-width="3"/>
+  <line x1="726" y1="330" x2="760" y2="345" stroke="#333" stroke-width="3"/>
+  <polygon points="760,345 748,346 754,336" fill="#333"/>
+  <line x1="760" y1="345" x2="760" y2="520" stroke="#111" stroke-width="4"/>
+  <circle cx="760" cy="520" r="5" fill="#111"/>
+
+  <text x="800" y="315" font-size="16" font-weight="bold" fill="#222">2N2222</text>
+  <text x="800" y="335" font-size="12" fill="#444">transistor</text>
+  <g font-size="14" font-weight="bold" fill="#7b2cbf">
+    <text x="768" y="275">C</text>
+    <text x="700" y="312">B</text>
+    <text x="768" y="372">E</text>
+  </g>
+
+  <!-- GPIO5 to R1 to base (yellow/orange signal) -->
+  <line x1="226" y1="320" x2="420" y2="320" stroke="#f08c00" stroke-width="4"/>
+  <polyline points="420,320 428,306 443,334 458,306 473,334 488,306 496,320" fill="none" stroke="#333" stroke-width="3"/>
+  <line x1="496" y1="320" x2="726" y2="320" stroke="#f08c00" stroke-width="4"/>
+  <rect x="404" y="270" width="110" height="26" rx="5" fill="#fff3d6" stroke="#f08c00"/>
+  <text x="459" y="288" text-anchor="middle" font-size="14" font-weight="bold" fill="#222">R1 = 1 k&#937;</text>
+
+  <!-- R2 pull-down from base node to GND -->
+  <circle cx="600" cy="320" r="6" fill="#f08c00"/>
+  <line x1="600" y1="320" x2="600" y2="380" stroke="#f08c00" stroke-width="4"/>
+  <polyline points="600,380 586,388 614,403 586,418 614,433 586,448 600,456" fill="none" stroke="#333" stroke-width="3"/>
+  <line x1="600" y1="456" x2="600" y2="520" stroke="#111" stroke-width="4"/>
+  <circle cx="600" cy="520" r="5" fill="#111"/>
+  <rect x="618" y="404" width="112" height="26" rx="5" fill="#fff3d6" stroke="#f08c00"/>
+  <text x="674" y="422" text-anchor="middle" font-size="14" font-weight="bold" fill="#222">R2 = 10 k&#937;</text>
+
+  <!-- Button -->
+  <line x1="226" y1="400" x2="320" y2="400" stroke="#1971c2" stroke-width="4"/>
+  <circle cx="326" cy="400" r="6" fill="#fff" stroke="#333" stroke-width="2.5"/>
+  <circle cx="374" cy="400" r="6" fill="#fff" stroke="#333" stroke-width="2.5"/>
+  <line x1="320" y1="382" x2="380" y2="382" stroke="#333" stroke-width="3"/>
+  <line x1="350" y1="382" x2="350" y2="366" stroke="#333" stroke-width="3"/>
+  <line x1="338" y1="366" x2="362" y2="366" stroke="#333" stroke-width="3"/>
+  <text x="350" y="355" text-anchor="middle" font-size="14" font-weight="bold" fill="#222">Button</text>
+  <polyline points="380,400 420,400 420,520" fill="none" stroke="#111" stroke-width="4"/>
+  <circle cx="420" cy="520" r="5" fill="#111"/>
+
+  <!-- Legend -->
+  <g font-size="13" fill="#222">
+    <line x1="40" y1="578" x2="70" y2="578" stroke="#d62828" stroke-width="4"/>
+    <text x="78" y="583">5V</text>
+    <line x1="120" y1="578" x2="150" y2="578" stroke="#111" stroke-width="4"/>
+    <text x="158" y="583">GND</text>
+    <line x1="210" y1="578" x2="240" y2="578" stroke="#f08c00" stroke-width="4"/>
+    <text x="248" y="583">fan control signal</text>
+    <line x1="390" y1="578" x2="420" y2="578" stroke="#1971c2" stroke-width="4"/>
+    <text x="428" y="583">button signal</text>
+    <line x1="540" y1="578" x2="570" y2="578" stroke="#666" stroke-width="4"/>
+    <text x="578" y="583">fan &#8722; (switched)</text>
+    <circle cx="720" cy="578" r="5" fill="#333"/>
+    <text x="732" y="583">dot = wires joined</text>
+  </g>
+</svg>

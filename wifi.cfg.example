@@ -1,0 +1,10 @@
+# Copy this file to the board as wifi.cfg and fill in your network.
+ssid=YourNetworkName
+password=YourWifiPassword
+
+# Optional: name on the local network, opens as http://terrarium1.local/
+# Letters, digits and hyphens only. Defaults to "terrarium".
+hostname=terrarium1
+
+# Optional: hours to add to UTC for log timestamps (e.g. 1 for UTC+1, -5 for UTC-5)
+utc_offset_hours=0
