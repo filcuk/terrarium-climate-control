@@ -37,18 +37,27 @@ MINUTE = 60 * SECOND
 DAY_S = 24 * 60 * 60
 
 # Defaults, used until schedule.cfg / settings.cfg are saved from the web page
-DEFAULT_PERIOD_MIN = 60  # full cycle length
-DEFAULT_DURATION_MIN = 5  # scheduled run length (0 = schedule off)
 DEFAULT_MANUAL_MIN = 5  # on-demand run length
-DEFAULT_SENSOR_INTERVAL_S = 10  # AM2302 needs at least 2s between reads
+DEFAULT_SENSOR_INTERVAL_MIN = 15  # AM2302 is read on this interval; minimum is 5
+MIN_SENSOR_INTERVAL_MIN = 5
+MAX_SENSOR_INTERVAL_MIN = 60
 DEFAULT_LOG_KEEP = 100
-SENSOR_LOG_MS = 5 * MINUTE  # how often to write climate into the rolling log
-DEFAULT_HISTORY_DAYS = 7
-MAX_HISTORY_DAYS = 7  # limited by RAM: ~1 sample/min is held in memory
-HISTORY_MIN_GAP_S = 60  # store at most one climate sample per minute
-HISTORY_MAX_POINTS = 7 * 24 * 60  # hard cap (~7 days at 1/min)
-FAN_RUNS_MAX = 1500  # hard cap on stored fan runs (RAM)
+MIN_LOG_KEEP = 20
+MAX_LOG_KEEP = 250
+# Climate history is folded as it ages: raw, 1h, 4h, 12h, then dropped after 30 days.
+# 500 is only a guard. A 5-minute readout for 30 days is about 410 points.
+HISTORY_HARD_CAP = 500
+FAN_KEEP_S = 7 * DAY_S
+FAN_RUNS_MAX = 500  # guard for a stuck fan; a normal week stays well under this
 CHART_MAX_POINTS = 400
+SAMPLE_PAGE = 50
+SLOT_S = 30 * 60
+N_SLOTS = 48
+MEM_LOG_MS = 60 * MINUTE
+MAINT_KEEP_S = 30 * DAY_S
+MAINT_MAX = 100
+MAINT_KINDS = ("mist", "feed", "soil", "deco", "note")
+NOTE_MAX = 120
 
 DEBOUNCE_MS = 50  # button must read steadily for this long to count
 # After the fan turns ON, ignore the button briefly. Fan motors inject noise into
@@ -67,6 +76,7 @@ LOG_FILE = "events.log"
 OLD_LOG_FILE = "fan.log"  # name used by earlier versions; renamed on boot
 HISTORY_FILE = "climate.hist"
 FAN_HISTORY_FILE = "fan.hist"
+MAINT_FILE = "maintenance.hist"
 
 WEB_PORT = 80
 DEFAULT_HOSTNAME = "terrarium"  # reachable as http://terrarium.local/; override with hostname= in wifi.cfg
@@ -74,21 +84,22 @@ WIFI_RETRY_MIN_MS = 30 * SECOND
 WIFI_RETRY_MAX_MS = 10 * MINUTE
 
 # State Variables
-period_ms = DEFAULT_PERIOD_MIN * MINUTE
-duration_ms = DEFAULT_DURATION_MIN * MINUTE
 manual_ms = DEFAULT_MANUAL_MIN * MINUTE
-sensor_interval_ms = DEFAULT_SENSOR_INTERVAL_S * SECOND
+sensor_interval_ms = DEFAULT_SENSOR_INTERVAL_MIN * MINUTE
 log_keep = DEFAULT_LOG_KEEP
-history_days = DEFAULT_HISTORY_DAYS
 
-epoch = 0
-cycle_no = 0
 manual_start = 0
 manual_running = False
-suppressed_cycle = -1
+suppressed_until = 0  # device UTC seconds; schedule stays off until then
 btn_blank_start = None
 fan_was_active = False
 sched_was_running = False
+# 48 half-hours from local midnight. 1 = fan scheduled on. Default 08:00-14:00.
+segments = [0] * N_SLOTS
+for _i in range(16, 28):
+  segments[_i] = 1
+# Monday is 0. Default every day, so an older schedule file keeps running all week.
+weekdays = [1] * 7
 
 # Button debounce state (1 = released, 0 = pressed)
 btn_stable = 1
@@ -106,6 +117,9 @@ hostname = None
 server = None
 time_synced = False
 tz_offset_s = 0
+tz_name = "Europe/London"
+tz_fixed = False  # True when an old utc_offset_hours is in use (no summer time)
+tz_checked_at = 0
 
 # Log state
 log_lines = []
@@ -118,14 +132,17 @@ humidity = None
 sensor_ok = False
 sensor_error = None
 sensor_read_at = 0
-sensor_logged_at = 0
 
-# Climate history: list of (device UTC seconds, temp, humidity)
+# Climate history: (device UTC seconds, temp, humidity, span seconds). span 0 = raw reading.
 history = []
 history_stored_at = 0
-# Fan runs: list of (start, end) device UTC seconds; fan_run_start is set while running
+# Fan runs: (start, end, manual) device UTC seconds. manual 1 = on-demand.
 fan_runs = []
 fan_run_start = None
+fan_run_manual = 0
+# Maintenance: (device UTC seconds, kind), oldest first
+maintenance = []
+mem_logged_at = 0
 
 
 # ---------------------------------------------------------------- helpers
@@ -169,8 +186,135 @@ def timestamp():
   return "uptime %ds" % (utime.ticks_ms() // SECOND)
 
 
+def timezone_label():
+  if tz_name:
+    return tz_name
+  sign = "+" if tz_offset_s >= 0 else "-"
+  minutes = abs(int(tz_offset_s)) // 60
+  hours, mins = minutes // 60, minutes % 60
+  if mins:
+    return "UTC%s%d:%02d" % (sign, hours, mins)
+  return "UTC%s%d" % (sign, hours)
+
+
 # Some MicroPython builds count time from 2000-01-01 instead of 1970; the browser needs 1970
 EPOCH_OFFSET_S = 946684800 if utime.gmtime(0)[0] == 2000 else 0
+
+
+# name -> (standard offset hours, summer offset hours, rule)
+# "eu": last Sunday of March 01:00 UTC through last Sunday of October 01:00 UTC
+# "us": second Sunday of March 02:00 local standard through first Sunday of November 02:00 local daylight
+ZONES = {
+  "UTC": (0, 0, ""),
+  "Europe/London": (0, 1, "eu"),
+  "Europe/Paris": (1, 2, "eu"),
+  "America/New_York": (-5, -4, "us"),
+  "America/Chicago": (-6, -5, "us"),
+  "America/Denver": (-7, -6, "us"),
+  "America/Los_Angeles": (-8, -7, "us"),
+}
+
+
+def days_from_civil(y, m, d):
+  """Days since 1970-01-01 (Howard Hinnant)."""
+  y -= m <= 2
+  era = (y if y >= 0 else y - 399) // 400
+  yoe = y - era * 400
+  doy = (153 * (m + (-3 if m > 2 else 9)) + 2) // 5 + d - 1
+  doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+  return era * 146097 + doe - 719468
+
+
+def civil_from_days(z):
+  """Inverse of days_from_civil. Returns (year, month, day)."""
+  z += 719468
+  era = (z if z >= 0 else z - 146096) // 146097
+  doe = z - era * 146097
+  yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+  y = yoe + era * 400
+  doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+  mp = (5 * doy + 2) // 153
+  d = doy - (153 * mp + 2) // 5 + 1
+  m = mp + 3 if mp < 10 else mp - 9
+  return y + (m <= 2), m, d
+
+
+def unix_ts(y, m, d, hh=0):
+  return days_from_civil(y, m, d) * DAY_S + hh * 3600
+
+
+def weekday_mon0(y, m, d):
+  """Monday is 0. 1970-01-01 was a Thursday."""
+  return (days_from_civil(y, m, d) + 3) % 7
+
+
+def last_day(y, m):
+  if m == 12:
+    return days_from_civil(y + 1, 1, 1) - days_from_civil(y, m, 1)
+  return days_from_civil(y, m + 1, 1) - days_from_civil(y, m, 1)
+
+
+def nth_sunday(y, m, n):
+  """n = 1, 2, ... or -1 for the last Sunday. Sunday's Monday-based weekday is 6."""
+  if n < 0:
+    ld = last_day(y, m)
+    return ld - (weekday_mon0(y, m, ld) - 6) % 7
+  first = 1 + (6 - weekday_mon0(y, m, 1)) % 7
+  return first + (n - 1) * 7
+
+
+def zone_offset_s(name, device_ts):
+  std_h, dst_h, rule = ZONES.get(name, ZONES["UTC"])
+  if not rule:
+    return std_h * 3600
+  unix = device_ts + EPOCH_OFFSET_S
+  y, _, _ = civil_from_days(unix // DAY_S)
+  if rule == "eu":
+    start = unix_ts(y, 3, nth_sunday(y, 3, -1), 1)
+    end = unix_ts(y, 10, nth_sunday(y, 10, -1), 1)
+  else:
+    start = unix_ts(y, 3, nth_sunday(y, 3, 2), 2) - std_h * 3600
+    end = unix_ts(y, 11, nth_sunday(y, 11, 1), 2) - dst_h * 3600
+  return (dst_h if start <= unix < end else std_h) * 3600
+
+
+def refresh_tz(force=False):
+  """Recompute the cached local offset. Summer time flips without a restart."""
+  global tz_offset_s, tz_checked_at
+  if tz_fixed:
+    return
+  now_ms = utime.ticks_ms()
+  if not force and tz_checked_at and utime.ticks_diff(now_ms, tz_checked_at) < MINUTE:
+    return
+  tz_checked_at = now_ms
+  tz_offset_s = zone_offset_s(tz_name, utime.time())
+
+
+def apply_zone(cfg):
+  """timezone= wins. An old utc_offset_hours file keeps that fixed offset."""
+  global tz_name, tz_fixed, tz_offset_s
+  name = cfg.get("timezone", "").strip()
+  if name:
+    if name not in ZONES:
+      log("Timezone '%s' is not built in; using UTC." % name)
+      tz_name = "UTC"
+    else:
+      tz_name = name
+    tz_fixed = False
+  elif "utc_offset_hours" in cfg:
+    tz_fixed = True
+    tz_name = ""
+    try:
+      tz_offset_s = int(float(cfg["utc_offset_hours"]) * 3600)
+    except ValueError:
+      tz_offset_s = 0
+    log("Timezone: fixed UTC offset %+gh (no summer time)." % (tz_offset_s / 3600.0))
+    return
+  else:
+    tz_name = "Europe/London"
+    tz_fixed = False
+  refresh_tz(True)
+  log("Timezone: %s." % tz_name)
 
 
 # ---------------------------------------------------------------- logging
@@ -249,115 +393,229 @@ def purge_log():
 # ---------------------------------------------------------------- settings
 
 def load_settings():
-  global sensor_interval_ms, log_keep, history_days
+  global sensor_interval_ms, log_keep
   cfg = read_cfg(SETTINGS_CFG)
+  # sensor_interval_s from older builds is ignored so a saved 10 seconds becomes 15 minutes
   try:
-    interval = int(cfg.get("sensor_interval_s", DEFAULT_SENSOR_INTERVAL_S))
+    interval = int(cfg["sensor_interval_min"])
+  except (KeyError, ValueError):
+    interval = DEFAULT_SENSOR_INTERVAL_MIN
+  if not MIN_SENSOR_INTERVAL_MIN <= interval <= MAX_SENSOR_INTERVAL_MIN:
+    interval = DEFAULT_SENSOR_INTERVAL_MIN
+  try:
     keep = int(cfg.get("log_keep", DEFAULT_LOG_KEEP))
-    days = int(cfg.get("history_days", DEFAULT_HISTORY_DAYS))
-    validate_settings(interval, keep, days)
   except ValueError:
-    interval, keep, days = DEFAULT_SENSOR_INTERVAL_S, DEFAULT_LOG_KEEP, DEFAULT_HISTORY_DAYS
-  sensor_interval_ms = interval * SECOND
+    keep = DEFAULT_LOG_KEEP
+  if keep < MIN_LOG_KEEP:
+    keep = MIN_LOG_KEEP
+  elif keep > MAX_LOG_KEEP:
+    keep = MAX_LOG_KEEP
+  sensor_interval_ms = interval * MINUTE
   log_keep = keep
-  history_days = days
 
 
-def validate_settings(interval, keep, days):
-  if not 2 <= interval <= 3600:
-    raise ValueError("Sensor interval must be 2-3600 seconds.")
-  if not 20 <= keep <= 500:
-    raise ValueError("Log lines kept must be 20-500.")
-  if not 1 <= days <= MAX_HISTORY_DAYS:
-    raise ValueError("Climate history must be 1-%d days." % MAX_HISTORY_DAYS)
+def validate_settings(interval, keep):
+  if not MIN_SENSOR_INTERVAL_MIN <= interval <= MAX_SENSOR_INTERVAL_MIN:
+    raise ValueError("Sensor interval must be %d-%d minutes." % (MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN))
+  if not MIN_LOG_KEEP <= keep <= MAX_LOG_KEEP:
+    raise ValueError("Log lines kept must be %d-%d." % (MIN_LOG_KEEP, MAX_LOG_KEEP))
 
 
-def save_settings(interval, keep, days):
-  global sensor_interval_ms, log_keep, history_days
-  validate_settings(interval, keep, days)
+def save_settings(interval, keep):
+  global sensor_interval_ms, log_keep
+  validate_settings(interval, keep)
   with open(SETTINGS_CFG, "w") as f:
-    f.write("sensor_interval_s=%d\nlog_keep=%d\nhistory_days=%d\n" % (interval, keep, days))
-  sensor_interval_ms = interval * SECOND
+    f.write("sensor_interval_min=%d\nlog_keep=%d\n" % (interval, keep))
+  sensor_interval_ms = interval * MINUTE
   log_keep = keep
   trim_log_memory()
   rewrite_log_file()
-  if days < history_days:
-    history_days = days
-    prune_history()
-    rewrite_history_file()
-    prune_fan_runs(utime.time())
-    rewrite_fan_runs_file()
-  history_days = days
-  log("Settings changed: sensor every %ds, keep %d log lines, %dd climate history." % (interval, keep, days))
+  log("Settings changed: sensor every %d min, keep %d log lines." % (interval, keep))
 
 
 # ---------------------------------------------------------------- schedule
 
 def load_schedule():
-  global period_ms, duration_ms, manual_ms
+  global manual_ms
   cfg = read_cfg(SCHEDULE_CFG)
   try:
-    period = int(cfg.get("period_min", DEFAULT_PERIOD_MIN))
-    duration = int(cfg.get("duration_min", DEFAULT_DURATION_MIN))
     manual = int(cfg.get("manual_min", DEFAULT_MANUAL_MIN))
-    validate_schedule(period, duration, manual)
   except ValueError:
-    period, duration, manual = DEFAULT_PERIOD_MIN, DEFAULT_DURATION_MIN, DEFAULT_MANUAL_MIN
-  period_ms, duration_ms, manual_ms = period * MINUTE, duration * MINUTE, manual * MINUTE
+    manual = DEFAULT_MANUAL_MIN
+  if not 1 <= manual <= 1440:
+    manual = DEFAULT_MANUAL_MIN
+  manual_ms = manual * MINUTE
+  text = cfg.get("segments", "")
+  if len(text) == N_SLOTS and all(c in "01" for c in text):
+    for i, c in enumerate(text):
+      segments[i] = 1 if c == "1" else 0
+  # No segments line (including an old period/duration file) keeps the 08:00-14:00 default.
+  days = cfg.get("weekdays", "")
+  if len(days) == 7 and all(c in "01" for c in days):
+    for i, c in enumerate(days):
+      weekdays[i] = 1 if c == "1" else 0
+  # No weekdays line keeps every day selected.
 
 
-def validate_schedule(period, duration, manual):
-  if not 1 <= period <= 1440:
-    raise ValueError("Cycle length must be 1-1440 minutes.")
-  if not 0 <= duration < period:
-    raise ValueError("Run time must be 0 or more, and shorter than the cycle length.")
+def validate_schedule(text, manual, days):
+  if len(text) != N_SLOTS or any(c not in "01" for c in text):
+    raise ValueError("Schedule must be 48 half-hour segments of 0 or 1.")
+  if len(days) != 7 or any(c not in "01" for c in days):
+    raise ValueError("Weekdays must be 7 values of 0 or 1, Monday first.")
   if not 1 <= manual <= 1440:
     raise ValueError("On-demand run must be 1-1440 minutes.")
 
 
-def save_schedule(period, duration, manual):
-  global period_ms, duration_ms, manual_ms, suppressed_cycle
-  validate_schedule(period, duration, manual)
+def save_schedule(text, manual, days):
+  global manual_ms, suppressed_until
+  validate_schedule(text, manual, days)
   with open(SCHEDULE_CFG, "w") as f:
-    f.write("period_min=%d\nduration_min=%d\nmanual_min=%d\n" % (period, duration, manual))
-  period_ms, duration_ms, manual_ms = period * MINUTE, duration * MINUTE, manual * MINUTE
-  suppressed_cycle = -1
+    f.write("manual_min=%d\nsegments=%s\nweekdays=%s\n" % (manual, text, days))
+  manual_ms = manual * MINUTE
+  for i, c in enumerate(text):
+    segments[i] = 1 if c == "1" else 0
+  for i, c in enumerate(days):
+    weekdays[i] = 1 if c == "1" else 0
+  suppressed_until = 0
   log("Schedule changed: %s" % schedule_text())
 
 
-def cycle_text():
-  if duration_ms == 0:
+def slot_clock(i):
+  i = i % N_SLOTS
+  return "%02d:%02d" % (i // 2, (i % 2) * 30)
+
+
+def segments_text():
+  if not any(segments):
     return "schedule off"
-  return "%s every %s" % (fmt_duration(duration_ms), fmt_duration(period_ms))
+  if all(segments):
+    return "00:00-24:00"
+  i0 = 0
+  guard = 0
+  while segments[i0] and guard < N_SLOTS:
+    i0 = (i0 + 1) % N_SLOTS
+    guard += 1
+  parts = []
+  start = None
+  for step in range(N_SLOTS):
+    idx = (i0 + step) % N_SLOTS
+    if segments[idx]:
+      if start is None:
+        start = idx
+    elif start is not None:
+      parts.append("%s-%s" % (slot_clock(start), slot_clock(idx)))
+      start = None
+  if start is not None:
+    parts.append("%s-%s" % (slot_clock(start), slot_clock(i0)))
+  return ", ".join(parts)
+
+
+def weekdays_text():
+  if not any(weekdays):
+    return "no days"
+  if all(weekdays):
+    return ""
+  names = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+  parts = []
+  start = None
+  for i in range(8):
+    on = i < 7 and weekdays[i]
+    if on and start is None:
+      start = i
+    elif not on and start is not None:
+      parts.append(names[start] if start == i - 1 else "%s-%s" % (names[start], names[i - 1]))
+      start = None
+  return ", ".join(parts)
+
+
+def schedule_summary():
+  picked = weekdays_text()
+  base = segments_text()
+  if picked:
+    return "%s, %s" % (base, picked)
+  return base
 
 
 def schedule_text():
-  return "%s | on-demand run: %s" % (cycle_text(), fmt_duration(manual_ms))
+  return "%s | on-demand run: %s" % (schedule_summary(), fmt_duration(manual_ms))
+
+
+def local_parts():
+  """Return (device UTC seconds, local seconds, slot index 0-47, seconds into the slot)."""
+  now_ts = utime.time()
+  local = now_ts + tz_offset_s
+  sec_day = int(local % DAY_S)
+  return now_ts, local, sec_day // SLOT_S, sec_day % SLOT_S
+
+
+def local_weekday(local):
+  """Monday is 0. local is device-epoch seconds plus the timezone offset."""
+  y, m, d = civil_from_days((int(local) + EPOCH_OFFSET_S) // DAY_S)
+  return weekday_mon0(y, m, d)
+
+
+def slot_selected(idx, weekday):
+  return segments[idx] and weekdays[weekday % 7]
+
+
+def stretch_remaining_s(idx, sec_into, weekday):
+  """Seconds until this run of selected slots ends. An off day ends it at midnight."""
+  n = 0
+  i = idx
+  wd = weekday
+  while n < N_SLOTS * 7 and slot_selected(i, wd):
+    n += 1
+    i = (i + 1) % N_SLOTS
+    if i == 0:
+      wd = (wd + 1) % 7
+  return n * SLOT_S - sec_into
+
+
+def next_run_delay_s():
+  """Seconds from now until the next selected slot on a selected day."""
+  if not time_synced or not any(segments) or not any(weekdays):
+    return None
+  now_ts, local, idx, sec_into = local_parts()
+  origin = now_ts
+  if suppressed_until and now_ts < suppressed_until:
+    origin = suppressed_until
+    local = origin + tz_offset_s
+    sec_day = int(local % DAY_S)
+    idx = sec_day // SLOT_S
+    sec_into = sec_day % SLOT_S
+  weekday = local_weekday(local)
+  for step in range(N_SLOTS * 7):
+    if step == 0 and sec_into != 0:
+      continue
+    slot = (idx + step) % N_SLOTS
+    wd = (weekday + (idx + step) // N_SLOTS) % 7
+    if slot_selected(slot, wd):
+      return step * SLOT_S - sec_into + (origin - now_ts)
+  return None
 
 
 def schedule_state(now):
-  """Return (schedule_running, in_window, ms_into_cycle)."""
-  global epoch, cycle_no, suppressed_cycle
-  elapsed = utime.ticks_diff(now, epoch)
-  # Re-anchor every cycle: ticks_diff is only valid for a few days, the device runs forever
-  while elapsed >= period_ms:
-    epoch = utime.ticks_add(epoch, period_ms)
-    elapsed -= period_ms
-    cycle_no += 1
-  in_window = elapsed < duration_ms
-  if not in_window and suppressed_cycle == cycle_no:
-    suppressed_cycle = -1
-  return in_window and suppressed_cycle != cycle_no, in_window, elapsed
+  """Return (schedule_running, in_selected_slot, seconds_left_in_stretch)."""
+  if not time_synced or not any(segments) or not any(weekdays):
+    return False, False, 0
+  now_ts, local, idx, sec_into = local_parts()
+  weekday = local_weekday(local)
+  if not slot_selected(idx, weekday):
+    return False, False, 0
+  if suppressed_until and now_ts < suppressed_until:
+    return False, True, 0
+  return True, True, stretch_remaining_s(idx, sec_into, weekday)
 
 
 def toggle_fan(now, source):
   """Same action as the physical button: stop if running, otherwise start an on-demand run."""
-  global manual_running, manual_start, suppressed_cycle, btn_blank_start
+  global manual_running, manual_start, suppressed_until, btn_blank_start
   sched_running, _, _ = schedule_state(now)
   if sched_running or manual_running:
     manual_running = False
     if sched_running:
-      suppressed_cycle = cycle_no
+      _, local, idx, sec_into = local_parts()
+      suppressed_until = utime.time() + stretch_remaining_s(idx, sec_into, local_weekday(local))
     log("%s: fan STOPPED by user." % source)
   else:
     manual_running = True
@@ -367,109 +625,195 @@ def toggle_fan(now, source):
     log("%s: on-demand %s run STARTED." % (source, fmt_duration(manual_ms)))
 
 
+def climate_averages():
+  """Time-weighted mean. A 12-hour point counts for 12 hours, not as one row."""
+  if not history:
+    return None, None
+  interval = sensor_interval_ms // SECOND
+  if interval < 1:
+    interval = 1
+  wt = wh = w = 0.0
+  for _, t, h, span in history:
+    dur = span if span else interval
+    wt += t * dur
+    wh += h * dur
+    w += dur
+  if w <= 0:
+    return None, None
+  return wt / w, wh / w
+
+
+def last_maint(kind):
+  for ts, k, _text in reversed(maintenance):
+    if k == kind:
+      return ts + EPOCH_OFFSET_S
+  return None
+
+
+def storage_usage():
+  """Used and free bytes on the filesystem. None if the port cannot report it."""
+  try:
+    st = os.statvfs("/")
+  except (OSError, AttributeError):
+    return None, None
+  if len(st) < 5:
+    return None, None
+  block = st[1] or st[0]
+  if not block:
+    return None, None
+  total = st[2] * block
+  free = st[4] * block
+  used = total - free
+  if used < 0:
+    used = 0
+  return used, free
+
+
 def status(now):
-  sched_running, in_window, elapsed = schedule_state(now)
-  manual_left = manual_ms - utime.ticks_diff(now, manual_start) if manual_running else 0
-  sched_left = duration_ms - elapsed if sched_running else 0
-  if sched_running and manual_running:
-    mode = "Scheduled + on-demand run"
-  elif sched_running:
+  sched_running, _, sched_left = schedule_state(now)
+  manual_left = 0
+  if manual_running:
+    manual_left = max(0, (manual_ms - utime.ticks_diff(now, manual_start)) // SECOND)
+  if sched_running:
     mode = "Scheduled run"
   elif manual_running:
     mode = "On-demand run"
-  elif in_window:
-    mode = "Stopped by user, schedule resumes next cycle"
-  elif duration_ms == 0:
+  elif not time_synced:
+    mode = "Waiting for clock"
+  elif not any(segments) or not any(weekdays):
     mode = "Schedule off"
   else:
     mode = "Idle"
+  temp_avg, hum_avg = climate_averages()
+  next_run = None if sched_running else next_run_delay_s()
+  store_used, store_free = storage_usage()
   return {
     "fan_on": sched_running or manual_running,
     "mode": mode,
-    "remaining_s": max(manual_left, sched_left) // SECOND,
-    "next_run_s": (period_ms - elapsed) // SECOND if duration_ms else None,
-    "period_min": period_ms // MINUTE,
-    "duration_min": duration_ms // MINUTE,
+    "remaining_s": max(manual_left, sched_left if sched_running else 0),
+    "next_run_s": next_run,
     "manual_min": manual_ms // MINUTE,
-    "schedule": cycle_text(),
-    "manual": fmt_duration(manual_ms),
+    "segments": "".join("1" if s else "0" for s in segments),
+    "weekdays": "".join("1" if d else "0" for d in weekdays),
+    "schedule": schedule_summary(),
     "temp_c": temp_c,
     "humidity": humidity,
+    "temp_avg": temp_avg,
+    "hum_avg": hum_avg,
     "sensor_ok": sensor_ok,
     "sensor_error": sensor_error,
-    "sensor_interval_s": sensor_interval_ms // SECOND,
+    "sensor_interval_min": sensor_interval_ms // MINUTE,
     "log_keep": log_keep,
-    "history_days": history_days,
     "log_count": len(log_lines),
     "history_points": len(history),
-    "time_synced": time_synced,
+    "time_synced": bool(time_synced),
     "ip": device_ip,
     "hostname": hostname,
     "time": timestamp(),
+    "timezone": timezone_label(),
+    "mem_used": gc.mem_alloc(),
+    "mem_free": gc.mem_free(),
+    "storage_used": store_used,
+    "storage_free": store_free,
+    "last_mist": last_maint("mist"),
+    "last_feed": last_maint("feed"),
   }
 
 
 # ---------------------------------------------------------------- climate history
 
-def prune_history(now_ts=None):
+def tier_span(age):
+  """0 keeps the reading. Positive is the average bucket. -1 drops the point."""
+  if age <= DAY_S:
+    return 0
+  if age <= 3 * DAY_S:
+    return 3600
+  if age <= 7 * DAY_S:
+    return 4 * 3600
+  if age <= 30 * DAY_S:
+    return 12 * 3600
+  return -1
+
+
+def bucket_start(ts, span):
+  local = ts + tz_offset_s
+  return local - (local % span) - tz_offset_s
+
+
+def compact_history(now_ts=None):
+  """Fold aged samples into hour, 4-hour, and 12-hour averages. Drop past 30 days."""
   if now_ts is None:
     now_ts = utime.time()
-  cutoff = now_ts - history_days * DAY_S
-  while history and history[0][0] < cutoff:
-    history.pop(0)
-  while len(history) > HISTORY_MAX_POINTS:
+  merged = []
+  for ts, t, h, _span in history:
+    span = tier_span(now_ts - ts)
+    if span < 0:
+      continue
+    if span:
+      ts = bucket_start(ts, span)
+    if merged and merged[-1][0] == ts and merged[-1][4] == span:
+      merged[-1][1] += t
+      merged[-1][2] += h
+      merged[-1][3] += 1
+    else:
+      merged.append([ts, t, h, 1, span])
+  history[:] = []
+  for ts, st, sh, n, span in merged:
+    history.append((ts, st / n, sh / n, span))
+  while len(history) > HISTORY_HARD_CAP:
     history.pop(0)
 
 
 def rewrite_history_file():
   try:
     with open(HISTORY_FILE, "w") as f:
-      for ts, t, h in history:
-        f.write("%d,%.1f,%.1f\n" % (ts, t, h))
+      for ts, t, h, span in history:
+        f.write("%d,%.1f,%.1f,%d\n" % (ts, t, h, span))
   except OSError:
     pass
 
 
 def load_history():
+  global history_stored_at
+  history[:] = []
   try:
     with open(HISTORY_FILE) as f:
       for line in f:
         parts = line.strip().split(",")
-        if len(parts) != 3:
+        if len(parts) < 3:
           continue
         try:
-          history.append((int(parts[0]), float(parts[1]), float(parts[2])))
+          span = int(parts[3]) if len(parts) > 3 else 0
+          history.append((int(parts[0]), float(parts[1]), float(parts[2]), span))
         except ValueError:
           continue
+        # Fold as we read so a per-minute file is never held whole
+        if len(history) > HISTORY_HARD_CAP + 40:
+          compact_history()
   except OSError:
     pass
-  prune_history()
+  compact_history()
+  history_stored_at = history[-1][0] if history else 0
   rewrite_history_file()
 
 
 def store_history_sample(t, h):
-  """Keep at most one sample per HISTORY_MIN_GAP_S, for the last history_days."""
+  """Store one raw reading, then fold anything that has aged into a coarser tier."""
   global history_stored_at
   if not time_synced:
     return
   now_ts = utime.time()
-  if history_stored_at and now_ts - history_stored_at < HISTORY_MIN_GAP_S:
+  gap = sensor_interval_ms // SECOND
+  if history_stored_at and now_ts - history_stored_at < gap:
     return
-  history.append((now_ts, t, h))
+  history.append((now_ts, t, h, 0))
   history_stored_at = now_ts
-  prune_history(now_ts)
-  try:
-    with open(HISTORY_FILE, "a") as f:
-      f.write("%d,%.1f,%.1f\n" % (now_ts, t, h))
-  except OSError:
-    pass
-  # Rewrite occasionally so the file doesn't hold pruned-but-not-deleted lines forever
-  if len(history) % 60 == 0:
-    rewrite_history_file()
+  compact_history(now_ts)
+  rewrite_history_file()
 
 
 def prune_fan_runs(now_ts):
-  cutoff = now_ts - history_days * DAY_S
+  cutoff = now_ts - FAN_KEEP_S
   while fan_runs and fan_runs[0][1] < cutoff:
     fan_runs.pop(0)
   while len(fan_runs) > FAN_RUNS_MAX:
@@ -479,70 +823,101 @@ def prune_fan_runs(now_ts):
 def rewrite_fan_runs_file():
   try:
     with open(FAN_HISTORY_FILE, "w") as f:
-      for start, end in fan_runs:
-        f.write("%d,%d\n" % (start, end))
+      for start, end, manual in fan_runs:
+        f.write("%d,%d,%d\n" % (start, end, manual))
   except OSError:
     pass
 
 
 def load_fan_runs():
+  now_ts = utime.time()
+  cutoff = now_ts - FAN_KEEP_S
+  fan_runs[:] = []
   try:
     with open(FAN_HISTORY_FILE) as f:
       for line in f:
         parts = line.strip().split(",")
-        if len(parts) != 2:
+        if len(parts) < 2:
           continue
         try:
-          fan_runs.append((int(parts[0]), int(parts[1])))
+          start = int(parts[0])
+          end = int(parts[1])
+          manual = int(parts[2]) if len(parts) > 2 else 0
         except ValueError:
           continue
+        if end < cutoff:
+          continue
+        fan_runs.append((start, end, 1 if manual else 0))
+        while len(fan_runs) > FAN_RUNS_MAX:
+          fan_runs.pop(0)
   except OSError:
     pass
-  prune_fan_runs(utime.time())
+  prune_fan_runs(now_ts)
   rewrite_fan_runs_file()
 
 
-def track_fan_run(fan_active):
-  """Record fan on/off periods for the chart (only once the clock is synced)."""
+def close_fan_run(now_ts):
   global fan_run_start
-  if fan_active and fan_run_start is None and time_synced:
-    fan_run_start = utime.time()
-  elif not fan_active and fan_run_start is not None:
-    now_ts = utime.time()
-    fan_runs.append((fan_run_start, now_ts))
-    fan_run_start = None
-    prune_fan_runs(now_ts)
-    try:
-      with open(FAN_HISTORY_FILE, "a") as f:
-        f.write("%d,%d\n" % fan_runs[-1])
-    except OSError:
-      pass
-    if len(fan_runs) % 50 == 0:
-      rewrite_fan_runs_file()
+  if fan_run_start is None:
+    return
+  run = (fan_run_start, now_ts, fan_run_manual)
+  fan_run_start = None
+  fan_runs.append(run)
+  prune_fan_runs(now_ts)
+  if run not in fan_runs:
+    return
+  try:
+    with open(FAN_HISTORY_FILE, "a") as f:
+      f.write("%d,%d,%d\n" % run)
+  except OSError:
+    pass
+  if len(fan_runs) % 50 == 0:
+    rewrite_fan_runs_file()
 
 
-def history_json(days):
-  days = 1 if days not in (1, 3, 7) else days
+def track_fan_run(fan_active, manual):
+  """Record fan on/off periods. Schedule (manual=0) replaces on-demand mid-run."""
+  global fan_run_start, fan_run_manual
+  kind = 1 if manual else 0
+  if fan_active and time_synced:
+    if fan_run_start is None:
+      fan_run_start = utime.time()
+      fan_run_manual = kind
+    elif fan_run_manual != kind:
+      now_ts = utime.time()
+      close_fan_run(now_ts)
+      fan_run_start = now_ts
+      fan_run_manual = kind
+  elif fan_run_start is not None:
+    close_fan_run(utime.time())
+
+
+def history_json(days, page):
+  if days not in (1, 3, 7, 30):
+    days = 7
   now_ts = utime.time()
   cutoff = now_ts - days * DAY_S
-  points = [[ts + EPOCH_OFFSET_S, t, h] for ts, t, h in history if ts >= cutoff]
-  # Downsample for the browser if needed
-  if len(points) > CHART_MAX_POINTS:
-    step = (len(points) + CHART_MAX_POINTS - 1) // CHART_MAX_POINTS
-    points = points[::step]
-  runs = [r for r in fan_runs if r[1] >= cutoff]
-  if fan_run_start is not None:
-    runs.append((fan_run_start, now_ts))
-  # Merge runs closer together than one chart pixel-ish, to keep the response small
-  min_gap = days * DAY_S // CHART_MAX_POINTS
-  fan = []
-  for start, end in runs:
-    if fan and start - fan[-1][1] <= min_gap:
-      fan[-1][1] = max(fan[-1][1], end)
-    else:
-      fan.append([start, end])
-  fan = [[s + EPOCH_OFFSET_S, e + EPOCH_OFFSET_S] for s, e in fan]
-  return {"days": days, "points": points, "fan": fan}
+  window = [p for p in history if p[0] >= cutoff]
+  if page is not None:
+    if page < 0:
+      page = 0
+    rows = window[::-1]
+    chunk = rows[page * SAMPLE_PAGE:(page + 1) * SAMPLE_PAGE]
+    samples = [[p[0] + EPOCH_OFFSET_S, p[1], p[2], p[3]] for p in chunk]
+    return {"days": days, "total": len(rows), "page": page, "samples": samples}
+  pts = window
+  if len(pts) > CHART_MAX_POINTS:
+    step = (len(pts) + CHART_MAX_POINTS - 1) // CHART_MAX_POINTS
+    pts = pts[::step]
+  points = [[p[0] + EPOCH_OFFSET_S, p[1], p[2], p[3]] for p in pts]
+  # A window longer than the fan history would show only the recent slice.
+  fan = None
+  if days * DAY_S <= FAN_KEEP_S:
+    runs = [r for r in fan_runs if r[1] >= cutoff]
+    if fan_run_start is not None:
+      runs.append((fan_run_start, now_ts, fan_run_manual))
+    fan = [[s + EPOCH_OFFSET_S, e + EPOCH_OFFSET_S, m] for s, e, m in runs]
+  return {"days": days, "count": len(window), "points": points, "fan": fan}
 
 
 def purge_history():
@@ -550,12 +925,85 @@ def purge_history():
   history[:] = []
   fan_runs[:] = []
   history_stored_at = 0
-  # Keep tracking a run that is in progress, from now
   if fan_run_start is not None:
     fan_run_start = utime.time()
   rewrite_history_file()
   rewrite_fan_runs_file()
   log("Climate history purged.")
+
+
+# ---------------------------------------------------------------- maintenance
+
+def prune_maintenance(now_ts):
+  cutoff = now_ts - MAINT_KEEP_S
+  while maintenance and maintenance[0][0] < cutoff:
+    maintenance.pop(0)
+  while len(maintenance) > MAINT_MAX:
+    maintenance.pop(0)
+
+
+def rewrite_maintenance_file():
+  try:
+    with open(MAINT_FILE, "w") as f:
+      for ts, kind, text in maintenance:
+        if text:
+          f.write("%d,%s,%s\n" % (ts, kind, text))
+        else:
+          f.write("%d,%s\n" % (ts, kind))
+  except OSError:
+    pass
+
+
+def load_maintenance():
+  now_ts = utime.time()
+  maintenance[:] = []
+  try:
+    with open(MAINT_FILE) as f:
+      for line in f:
+        parts = line.strip().split(",")
+        if len(parts) < 2 or parts[1] not in MAINT_KINDS:
+          continue
+        text = ""
+        if parts[1] == "note":
+          text = " ".join(",".join(parts[2:]).split())[:NOTE_MAX]
+        try:
+          maintenance.append((int(parts[0]), parts[1], text))
+        except ValueError:
+          continue
+        prune_maintenance(now_ts)
+  except OSError:
+    pass
+  prune_maintenance(now_ts)
+  rewrite_maintenance_file()
+
+
+def record_maintenance(kind, text=""):
+  if kind not in MAINT_KINDS:
+    raise ValueError("Unknown maintenance kind.")
+  if not time_synced:
+    raise ValueError("Clock not synced.")
+  note = ""
+  if kind == "note":
+    note = " ".join(str(text).split())
+    if not note:
+      raise ValueError("Note is empty.")
+    note = note[:NOTE_MAX]
+  now_ts = utime.time()
+  maintenance.append((now_ts, kind, note))
+  prune_maintenance(now_ts)
+  rewrite_maintenance_file()
+  log("Maintenance: %s." % kind)
+
+
+def maintenance_json():
+  events = [[ts + EPOCH_OFFSET_S, kind, text] for ts, kind, text in reversed(maintenance)]
+  return {"events": events}
+
+
+def purge_maintenance():
+  maintenance[:] = []
+  rewrite_maintenance_file()
+  log("Maintenance history purged.")
 
 
 # ---------------------------------------------------------------- climate sensor
@@ -574,8 +1022,8 @@ def sensor_start():
 
 
 def sensor_poll(now):
-  """Read the AM2302 every sensor_interval_ms; log climate every SENSOR_LOG_MS."""
-  global temp_c, humidity, sensor_ok, sensor_error, sensor_read_at, sensor_logged_at
+  """Read the AM2302 every sensor_interval_ms. Only a failed read is written to the log."""
+  global temp_c, humidity, sensor_ok, sensor_error, sensor_read_at
   if dht is None:
     return
   if sensor_read_at and utime.ticks_diff(now, sensor_read_at) < sensor_interval_ms:
@@ -588,16 +1036,10 @@ def sensor_poll(now):
     sensor_ok = True
     sensor_error = None
     store_history_sample(temp_c, humidity)
-    if not sensor_logged_at or utime.ticks_diff(now, sensor_logged_at) >= SENSOR_LOG_MS:
-      log("Climate: %.1f C, %.1f%% RH" % (temp_c, humidity))
-      sensor_logged_at = now
   except Exception as e:
     sensor_ok = False
     sensor_error = str(e)
-    # Don't spam the log on every failed poll
-    if not sensor_logged_at or utime.ticks_diff(now, sensor_logged_at) >= SENSOR_LOG_MS:
-      log("Sensor: read failed (%s)" % e)
-      sensor_logged_at = now
+    log("Sensor: read failed (%s)" % e)
 
 
 # ---------------------------------------------------------------- button
@@ -634,16 +1076,19 @@ def wifi_connect(now):
     log("WiFi: connect error: %s" % e)
 
 
+def log_memory():
+  """Heap as it actually is: do not collect first."""
+  log("Memory: free=%d alloc=%d history=%d fan=%d log=%d maint=%d" % (
+    gc.mem_free(), gc.mem_alloc(), len(history), len(fan_runs), len(log_lines), len(maintenance)))
+
+
 def wifi_start(now):
-  global wlan, wifi_cfg, tz_offset_s, hostname
+  global wlan, wifi_cfg, hostname
   wifi_cfg = read_cfg(WIFI_CFG)
   if not wifi_cfg.get("ssid"):
     log("WiFi: no %s with ssid=... found, web interface disabled." % WIFI_CFG)
     return
-  try:
-    tz_offset_s = int(float(wifi_cfg.get("utc_offset_hours", "0")) * 3600)
-  except ValueError:
-    tz_offset_s = 0
+  apply_zone(wifi_cfg)
   # Hostname must be set before the interface comes up; the ESP32 port's mDNS
   # responder then answers for <hostname>.local
   name = wifi_cfg.get("hostname", DEFAULT_HOSTNAME)
@@ -678,6 +1123,7 @@ def sync_time():
   try:
     ntptime.settime()
     time_synced = True
+    refresh_tz(True)
     log("Clock synced from the internet.")
   except Exception as e:
     log("Clock sync failed (%s); log times show uptime." % e)
@@ -713,16 +1159,27 @@ def wifi_poll(now):
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Terrarium Climate Controller</title>
+<title>Terrarium Climate Control</title>
 <style>
 *{box-sizing:border-box}
 body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:0 auto;padding:16px;background:#eef2ee;color:#1b1f1b}
-h1{font-size:1.45em;margin:4px 0 16px}
+.title-row{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:4px 0 16px}
+h1{font-size:1.45em;margin:0}
+.meters{display:flex;flex-direction:column;gap:5px;flex:1;min-width:150px;max-width:340px;margin:0 8px}
+.meter{display:grid;grid-template-columns:2.2em minmax(48px,1fr) auto;align-items:center;gap:6px;color:#666;font-size:.72em}
+.bar{height:7px;background:#e4ece4;border-radius:99px;overflow:hidden}
+.bar div{height:100%;width:0;background:#2d6a4f}
+.meter .nums{white-space:nowrap}
+.device-time{color:#666;font-size:.85em;text-align:right;white-space:nowrap;line-height:1.35}
 h2{font-size:1.05em;margin:0 0 12px}
 .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
-@media(max-width:640px){.cards{grid-template-columns:1fr}}
+@media(max-width:640px){.cards{grid-template-columns:1fr}.device-time{white-space:normal}}
 .card{background:#fff;border-radius:14px;padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.12)}
 .cards .card{margin-bottom:0}
+button.fan-card{display:block;width:100%;text-align:left;font:inherit;color:#1b1f1b;cursor:pointer}
+button.fan-card:hover{background:#f3f8f4}
+button.fan-card.stop{background:#fff;box-shadow:inset 0 0 0 2px #c0392b,0 1px 3px rgba(0,0,0,.12)}
+button.fan-card:disabled{cursor:default}
 .kicker{font-size:.8em;color:#666;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
 .big{font-size:1.7em;font-weight:700;line-height:1.15}
 .sub{color:#666;font-size:.9em;margin-top:6px;min-height:1.2em}
@@ -732,30 +1189,58 @@ button,.btn{font-size:.95em;font-weight:600;padding:10px 16px;border:0;border-ra
 button.stop{background:#c0392b}
 button.secondary{background:#dde5dd;color:#1b1f1b}
 button:disabled{opacity:.5}
-.seg{display:inline-flex;gap:4px;background:#e8eee8;padding:3px;border-radius:10px}
+.seg{display:inline-flex;gap:4px;background:#e8eee8;padding:3px;border-radius:10px;flex-wrap:wrap}
 .seg button{background:transparent;color:#334;padding:7px 12px;box-shadow:none}
 .seg button.active{background:#fff;color:#1b1f1b}
 .chart-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
-.legend{display:flex;gap:14px;font-size:.85em;color:#555}
+.legend{display:flex;gap:14px;font-size:.85em;color:#555;flex-wrap:wrap}
 .swatch{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:middle}
 .hatch{border:1px solid #9cc3ad;background:repeating-linear-gradient(45deg,#7fb08f 0 1px,#e6f1ea 1px 4px),#e6f1ea}
-canvas{width:100%;height:220px;display:block;background:#fafcfa;border-radius:10px}
-dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:0}
-dt{color:#666}dd{margin:0;font-weight:600}
+.hatch-x{border:1px solid #9cc3ad;background:repeating-linear-gradient(45deg,#7fb08f 0 1px,transparent 1px 4px),repeating-linear-gradient(-45deg,#7fb08f 0 1px,transparent 1px 4px),#e6f1ea}
+.chart-wrap{position:relative}
+canvas{width:100%;height:220px;display:block;background:#fafcfa;border-radius:10px;touch-action:manipulation}
+.tip{position:absolute;background:#1b1f1b;color:#fff;padding:8px 10px;border-radius:8px;font-size:.8em;pointer-events:none;white-space:pre;z-index:2;display:none}
+.note-link{color:#1d4e89;cursor:pointer;text-decoration:underline}
+.chart-foot{display:flex;justify-content:space-between;align-items:baseline;gap:8px 16px;margin-top:8px;flex-wrap:wrap}
+.avg-tip{margin-left:auto;color:#888;font-size:.78em;white-space:nowrap}
 .row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0}
 input{width:100px;padding:8px;font-size:1em;border:1px solid #ccc;border-radius:8px}
 pre{background:#111;color:#cfe8cf;padding:12px;border-radius:10px;max-height:360px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:0}
 .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.days{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.day{height:32px;padding:0;border-radius:4px;background:#e4ece4;color:#1b1f1b;font-size:.72em}
+.day.on{background:#2d6a4f;color:#fff}
+.hours{display:grid;grid-template-columns:repeat(12,1fr);font-size:.72em;color:#666;margin-top:10px}
+.slots{display:grid;grid-template-columns:repeat(24,1fr);gap:3px}
+.slot{height:32px;padding:0;border-radius:4px;background:#e4ece4}
+.slot.on{background:#2d6a4f}
+table{width:100%;border-collapse:collapse;font-size:.9em;margin-top:8px}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
+.pager{display:flex;gap:8px;align-items:center;margin-top:8px}
+.maint-list{margin-top:14px}
+.maint-list div{padding:6px 0;border-bottom:1px solid #e4ece4}
+.maint-kind{font-weight:700}
+.maint-date{color:#999}
+.section-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.section-head h2{margin:0}
+.note-row{display:flex;gap:8px;flex:1;min-width:0}
+.note-row input{width:auto;flex:1;min-width:0}
 </style></head><body>
-<h1>Terrarium Climate Controller</h1>
+<div class="title-row">
+  <h1>Terrarium Climate Control</h1>
+  <div class="meters">
+    <div class="meter"><span>Mem</span><div class="bar"><div id="memBar"></div></div><span id="memLine" class="nums"></span></div>
+    <div class="meter"><span>Sto</span><div class="bar"><div id="storeBar"></div></div><span id="storeLine" class="nums"></span></div>
+  </div>
+  <div class="device-time"><div id="time"></div><div id="tz"></div></div>
+</div>
 
 <div class="cards">
-  <div class="card">
+  <button type="button" id="btn" class="card fan-card" onclick="press()" disabled>
     <div class="kicker">Fan</div>
     <div id="fanBig" class="big off">...</div>
     <div id="fanSub" class="sub"></div>
-    <div class="actions"><button id="btn" onclick="press()" disabled>...</button></div>
-  </div>
+  </button>
   <div class="card">
     <div class="kicker">Temperature</div>
     <div id="tempBig" class="big temp">...</div>
@@ -775,32 +1260,61 @@ pre{background:#111;color:#cfe8cf;padding:12px;border-radius:10px;max-height:360
       <button id="d1" onclick="setDays(1)">1 day</button>
       <button id="d3" onclick="setDays(3)">3 days</button>
       <button id="d7" class="active" onclick="setDays(7)">7 days</button>
+      <button id="d30" onclick="setDays(30)">30 days</button>
     </div>
   </div>
   <div class="legend"><span><span class="swatch" style="background:#b35c00"></span>Temp °C</span>
   <span><span class="swatch" style="background:#1d4e89"></span>Humidity %RH</span>
-  <span><span class="swatch hatch"></span>Fan running</span></div>
-  <canvas id="chart"></canvas>
-  <div id="chartNote" class="muted" style="margin-top:8px"></div>
+  <span id="fanKey"><span class="swatch hatch"></span>Fan</span>
+  <span id="fanKeyOn"><span class="swatch hatch-x"></span>On-demand fan</span></div>
+  <div class="chart-wrap">
+    <canvas id="chart"></canvas>
+    <div id="tip" class="tip"></div>
+  </div>
+  <div class="chart-foot">
+    <div id="chartNote" class="muted"></div>
+    <div class="avg-tip">After 1 day: &#216; 1h, 4h, then 12h &#183; Fan 7d</div>
+  </div>
+  <div id="samples" style="display:none">
+    <table><thead><tr><th>Time</th><th>Temperature</th><th>Humidity</th></tr></thead><tbody id="sampleRows"></tbody></table>
+    <div class="pager">
+      <button type="button" class="secondary" id="samplePrev" onclick="sampleStep(-1)">Newer</button>
+      <span id="samplePage" class="muted"></span>
+      <button type="button" class="secondary" id="sampleNext" onclick="sampleStep(1)">Older</button>
+    </div>
+  </div>
 </div>
 
 <div class="card">
-  <h2>Details</h2>
-  <dl>
-    <dt>Mode</dt><dd id="mode">&hellip;</dd>
-    <dt class="left">Time left</dt><dd class="left" id="left"></dd>
-    <dt class="next">Next scheduled run</dt><dd class="next" id="next"></dd>
-    <dt>Schedule</dt><dd id="sched"></dd>
-    <dt>On-demand run</dt><dd id="manual"></dd>
-    <dt>Device time</dt><dd id="time"></dd>
-  </dl>
+  <div class="section-head">
+    <h2>Maintenance</h2>
+    <div class="device-time">Mist <span id="mistAgo"></span> · Feed <span id="feedAgo"></span></div>
+  </div>
+  <div class="actions">
+    <button type="button" onclick="maint('mist')">Mist</button>
+    <button type="button" onclick="maint('feed')">Feed</button>
+    <button type="button" onclick="maint('soil')">Soil</button>
+    <button type="button" onclick="maint('deco')">Deco</button>
+    <form class="note-row" onsubmit="event.preventDefault(); addNote();">
+      <input id="noteText" type="text" maxlength="120" placeholder="Note" autocomplete="off">
+      <button>Add note</button>
+    </form>
+  </div>
+  <div id="maintMsg" class="muted"></div>
+  <div id="noteMsg" class="muted"></div>
+  <div id="maintList" class="maint-list muted">Loading…</div>
+  <div class="pager" id="maintPager" style="display:none">
+    <button type="button" class="secondary" id="maintPrev" onclick="maintStep(-1)">Newer</button>
+    <span id="maintPage" class="muted"></span>
+    <button type="button" class="secondary" id="maintNext" onclick="maintStep(1)">Older</button>
+  </div>
 </div>
 
 <div class="card">
-  <h2>Schedule</h2>
+  <h2>Ventilation Schedule</h2>
+  <div id="days" class="days"></div>
+  <div id="slots"></div>
   <form onsubmit="event.preventDefault(); saveSchedule();">
-    <div class="row"><label for="dur">Scheduled run (minutes, 0 = off)</label><input id="dur" type="number" min="0" required></div>
-    <div class="row"><label for="per">Repeat every (minutes)</label><input id="per" type="number" min="1" required></div>
     <div class="row"><label for="man">On-demand run (minutes)</label><input id="man" type="number" min="1" required></div>
     <button>Save schedule</button> <span id="schedMsg" class="muted"></span>
   </form>
@@ -809,13 +1323,13 @@ pre{background:#111;color:#cfe8cf;padding:12px;border-radius:10px;max-height:360
 <div class="card">
   <h2>Advanced</h2>
   <form onsubmit="event.preventDefault(); saveAdvanced();">
-    <div class="row"><label for="sint">Temperature readout every (seconds)</label><input id="sint" type="number" min="2" max="3600" required></div>
-    <div class="row"><label for="lkeep">Log lines to keep</label><input id="lkeep" type="number" min="20" max="500" required></div>
-    <div class="row"><label for="hdays">Climate history to keep (days, max 7)</label><input id="hdays" type="number" min="1" max="7" required></div>
+    <div class="row"><label for="sint">Temperature readout every (minutes)</label><input id="sint" type="number" min="5" max="60" required></div>
+    <div class="row"><label for="lkeep">Log lines to keep</label><input id="lkeep" type="number" min="20" max="250" required></div>
     <div class="actions">
       <button>Save advanced</button>
       <button type="button" class="secondary" onclick="purgeLog()">Purge log</button>
       <button type="button" class="secondary" onclick="purgeHistory()">Purge climate history</button>
+      <button type="button" class="secondary" onclick="purgeMaint()">Purge maintenance</button>
       <span id="advMsg" class="muted"></span>
     </div>
   </form>
@@ -823,14 +1337,19 @@ pre{background:#111;color:#cfe8cf;padding:12px;border-radius:10px;max-height:360
 
 <div class="card">
   <h2>Log (newest first)</h2>
-  <pre id="log">Loading&hellip;</pre>
+  <pre id="log">Loading…</pre>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
-let formLoaded = false, chartDays = 7, chartPoints = [], chartFan = [], hatch = null;
-function hatchPattern(ctx) {
-  if (hatch) return hatch;
+const NL = String.fromCharCode(10);
+let formLoaded = false, chartDays = 7, chartPoints = [], chartFan = [], chartGeom = null;
+let patterns = {}, tipPinned = false, samplesOpen = false, samplePage = 0, sampleTotal = 0;
+let maintEvents = [], maintPage = 0;
+const PAGE_SIZE = 50, MAINT_PAGE = 5;
+function hatchPattern(ctx, cross) {
+  const key = cross ? 'x' : 's';
+  if (patterns[key]) return patterns[key];
   const p = document.createElement('canvas'), n = 8;
   p.width = p.height = n;
   const g = p.getContext('2d');
@@ -838,18 +1357,32 @@ function hatchPattern(ctx) {
   g.strokeStyle = 'rgba(45,106,79,0.35)'; g.lineWidth = 1;
   g.beginPath();
   g.moveTo(0, n); g.lineTo(n, 0);
-  g.moveTo(0, 0); g.lineTo(n, n);
+  if (cross) { g.moveTo(0, 0); g.lineTo(n, n); }
   g.stroke();
-  return hatch = ctx.createPattern(p, 'repeat');
-}
-function show(cls, on) {
-  document.querySelectorAll('.' + cls).forEach(el => el.style.display = on ? '' : 'none');
+  return patterns[key] = ctx.createPattern(p, 'repeat');
 }
 function fmt(s) {
   s = Math.max(0, s | 0);
   const h = s / 3600 | 0, m = (s % 3600) / 60 | 0, x = s % 60;
   return (h ? h + 'h ' : '') + (h || m ? m + 'm ' : '') + x + 's';
 }
+function ago(ts) {
+  if (ts === null || ts === undefined) return 'never';
+  const s = Math.max(0, (Date.now() / 1000 - ts) | 0);
+  if (s < 60) return 'just now';
+  if (s < 3600) return (s / 60 | 0) + ' min ago';
+  if (s < 86400) {
+    const h = s / 3600 | 0;
+    return h + (h === 1 ? ' hr ago' : ' hrs ago');
+  }
+  const d = s / 86400 | 0;
+  return d + (d === 1 ? ' day ago' : ' days ago');
+}
+function clock(ts) {
+  const df = {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'};
+  return new Date(ts * 1000).toLocaleString([], df);
+}
+function mark(p) { return p[3] > 0 ? '\u00d8 ' : ''; }
 async function req(url, opts) {
   const r = await fetch(url, opts);
   const t = await r.text();
@@ -858,38 +1391,78 @@ async function req(url, opts) {
 }
 function setDays(d) {
   chartDays = d;
-  ['d1','d3','d7'].forEach(id => $(id).classList.toggle('active', id === 'd' + d));
+  ['d1','d3','d7','d30'].forEach(id => $(id).classList.toggle('active', id === 'd' + d));
+  samplePage = 0;
   loadHistory();
+  if (samplesOpen) loadSamples();
+}
+function axisTicks(x0, x1, step) {
+  const out = [];
+  const d = new Date((x0 + 1) * 1000);
+  const push = () => {
+    let guard = 0;
+    while (d.getTime() / 1000 < x1 && guard++ < 900) {
+      const t = d.getTime() / 1000;
+      const prev = d.getTime();
+      if (t > x0 && t < x1) out.push(t);
+      if (step >= 86400) d.setDate(d.getDate() + (step / 86400 | 0));
+      else d.setHours(d.getHours() + (step / 3600 | 0));
+      if (d.getTime() <= prev) break;
+    }
+  };
+  if (step >= 86400) {
+    d.setHours(0, 0, 0, 0);
+    if (d.getTime() / 1000 <= x0) d.setDate(d.getDate() + (step / 86400 | 0));
+    push();
+  } else {
+    const hours = step / 3600 | 0;
+    d.setMinutes(0, 0, 0);
+    const h = d.getHours();
+    const add = (hours - (h % hours)) % hours;
+    if (add === 0 && d.getTime() / 1000 <= x0) d.setHours(h + hours);
+    else if (add) d.setHours(h + add);
+    push();
+  }
+  return out;
+}
+function axisText(ts, step, span) {
+  const d = new Date(ts * 1000);
+  if (step >= 86400) return d.toLocaleString([], {month:'short', day:'numeric'});
+  const time = d.toLocaleString([], {hour:'2-digit', minute:'2-digit'});
+  if (span > 36 * 3600) return d.toLocaleString([], {month:'short', day:'numeric'}) + ' ' + time;
+  return time;
 }
 function drawChart() {
   const c = $('chart'), ctx = c.getContext('2d');
   const dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
   c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const pad = {l:40,r:40,t:16,b:28};
-  ctx.clearRect(0,0,W,H);
-  ctx.fillStyle = '#fafcfa'; ctx.fillRect(0,0,W,H);
+  const pad = {l:40, r:40, t:16, b:28};
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#fafcfa'; ctx.fillRect(0, 0, W, H);
   const pts = chartPoints;
+  chartGeom = null;
   if (!pts.length) {
     ctx.fillStyle = '#888'; ctx.font = '14px system-ui';
-    ctx.fillText('No history yet — samples are stored once the clock is synced.', pad.l, H/2);
+    ctx.fillText('No history yet. Samples are stored once the clock is synced.', pad.l, H / 2);
     return;
   }
-  let tMin=Infinity,tMax=-Infinity,hMin=Infinity,hMax=-Infinity;
-  pts.forEach(p => { tMin=Math.min(tMin,p[1]); tMax=Math.max(tMax,p[1]); hMin=Math.min(hMin,p[2]); hMax=Math.max(hMax,p[2]); });
+  let tMin = Infinity, tMax = -Infinity, hMin = Infinity, hMax = -Infinity;
+  pts.forEach(p => { tMin = Math.min(tMin, p[1]); tMax = Math.max(tMax, p[1]); hMin = Math.min(hMin, p[2]); hMax = Math.max(hMax, p[2]); });
   if (tMax === tMin) { tMin -= 1; tMax += 1; }
   if (hMax === hMin) { hMin = Math.max(0, hMin - 5); hMax = Math.min(100, hMax + 5); }
   tMin = Math.floor(tMin) - 1; tMax = Math.ceil(tMax) + 1;
   hMin = Math.max(0, Math.floor(hMin) - 5); hMax = Math.min(100, Math.ceil(hMax) + 5);
-  const x0 = pts[0][0], x1 = Math.max(pts[pts.length-1][0], x0 + 1);
+  const x0 = pts[0][0], x1 = Math.max(pts[pts.length - 1][0], x0 + 1);
   const x = ts => pad.l + (ts - x0) / Math.max(1, x1 - x0) * (W - pad.l - pad.r);
   const yT = v => pad.t + (1 - (v - tMin) / (tMax - tMin)) * (H - pad.t - pad.b);
   const yH = v => pad.t + (1 - (v - hMin) / (hMax - hMin)) * (H - pad.t - pad.b);
-  // Runs narrower than the hatch tile can't show the pattern, so draw them as thin solid bars
+  chartGeom = {x0, x1, pad, W, H, x, yT, yH, pts};
   chartFan.forEach(r => {
     if (r[1] < x0 || r[0] > x1) return;
     const a = x(Math.max(r[0], x0)), w = x(Math.min(r[1], x1)) - a;
-    ctx.fillStyle = w >= 6 ? hatchPattern(ctx) : 'rgba(45,106,79,0.28)';
+    const cross = r[2] === 1;
+    ctx.fillStyle = w >= 6 ? hatchPattern(ctx, cross) : (cross ? 'rgba(45,106,79,0.45)' : 'rgba(45,106,79,0.28)');
     ctx.fillRect(a, pad.t, Math.max(1, w), H - pad.t - pad.b);
   });
   ctx.strokeStyle = '#e0e6e0'; ctx.lineWidth = 1;
@@ -898,78 +1471,256 @@ function drawChart() {
     ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
   }
   ctx.font = '11px system-ui'; ctx.fillStyle = '#888';
-  ctx.fillText(tMax.toFixed(0) + '°', 4, pad.t + 4);
-  ctx.fillText(tMin.toFixed(0) + '°', 4, H - pad.b);
+  ctx.fillText(tMax.toFixed(0) + '\u00b0', 4, pad.t + 4);
+  ctx.fillText(tMin.toFixed(0) + '\u00b0', 4, H - pad.b);
   ctx.textAlign = 'right';
   ctx.fillText(hMax.toFixed(0) + '%', W - 4, pad.t + 4);
   ctx.fillText(hMin.toFixed(0) + '%', W - 4, H - pad.b);
   ctx.textAlign = 'left';
   function line(color, yfn, idx) {
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
-    pts.forEach((p,i) => { const X=x(p[0]), Y=yfn(p[idx]); i?ctx.lineTo(X,Y):ctx.moveTo(X,Y); });
+    pts.forEach((p, i) => { const X = x(p[0]), Y = yfn(p[idx]); i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
     ctx.stroke();
   }
   line('#1d4e89', yH, 2);
   line('#b35c00', yT, 1);
-  const first = new Date(pts[0][0]*1000), last = new Date(pts[pts.length-1][0]*1000);
   ctx.fillStyle = '#666';
-  const df = {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'};
-  ctx.fillText(first.toLocaleString([], df), pad.l, H - 8);
+  const startLabel = clock(pts[0][0]), endLabel = clock(pts[pts.length - 1][0]);
+  const gap = 16;
+  const leftLimit = pad.l + ctx.measureText(startLabel).width + gap;
+  const rightLimit = W - pad.r - ctx.measureText(endLabel).width - gap;
+  const span = x1 - x0;
+  const steps = [3600, 7200, 10800, 21600, 43200, 86400, 172800, 432000, 604800];
+  let drawn = [];
+  for (let s = 0; s < steps.length && !drawn.length; s++) {
+    const step = steps[s];
+    if (step >= span * 0.9) continue;
+    const placed = [];
+    let edge = leftLimit - gap, blocked = false;
+    axisTicks(x0, x1, step).forEach(ts => {
+      if (blocked) return;
+      const text = axisText(ts, step, span);
+      const w = ctx.measureText(text).width, cx = x(ts);
+      const left = cx - w / 2, right = cx + w / 2;
+      if (left < leftLimit || right > rightLimit) return;
+      if (left < edge + gap) { blocked = true; return; }
+      placed.push({text: text, cx: cx});
+      edge = right;
+    });
+    if (!blocked && placed.length) drawn = placed;
+  }
+  ctx.fillText(startLabel, pad.l, H - 8);
+  ctx.textAlign = 'center';
+  drawn.forEach(lab => ctx.fillText(lab.text, lab.cx, H - 8));
   ctx.textAlign = 'right';
-  ctx.fillText(last.toLocaleString([], df), W - pad.r, H - 8);
+  ctx.fillText(endLabel, W - pad.r, H - 8);
   ctx.textAlign = 'left';
+}
+function nearestPoint(clientX) {
+  if (!chartGeom || !chartGeom.pts.length) return null;
+  const rect = $('chart').getBoundingClientRect();
+  const px = clientX - rect.left;
+  const g = chartGeom;
+  let best = g.pts[0], bestD = Infinity;
+  g.pts.forEach(p => {
+    const d = Math.abs(g.x(p[0]) - px);
+    if (d < bestD) { best = p; bestD = d; }
+  });
+  return best;
+}
+function showTip(e, pin) {
+  const p = nearestPoint(e.clientX);
+  const tip = $('tip');
+  if (!p) { tip.style.display = 'none'; return; }
+  const g = chartGeom;
+  tip.textContent = clock(p[0]) + NL + mark(p) + p[1].toFixed(1) + ' \u00b0C' + NL + mark(p) + p[2].toFixed(1) + '%';
+  const x = g.x(p[0]), y = Math.min(g.yT(p[1]), g.yH(p[2]));
+  tip.style.left = Math.min(x + 8, g.W - 140) + 'px';
+  tip.style.top = Math.max(4, y - 56) + 'px';
+  tip.style.display = 'block';
+  if (pin) tipPinned = true;
+}
+function hideTip() {
+  tipPinned = false;
+  $('tip').style.display = 'none';
 }
 async function loadHistory() {
   try {
     const h = JSON.parse(await req('/api/history?days=' + chartDays));
     chartPoints = h.points || [];
-    chartFan = h.fan || [];
-    $('chartNote').textContent = chartPoints.length
-      ? (chartPoints.length + ' samples in this window')
-      : (h.note || 'No samples in this window yet. History starts after the clock syncs from the internet.');
+    const showFan = chartDays <= 7;
+    chartFan = showFan && h.fan ? h.fan : [];
+    $('fanKey').style.display = showFan ? '' : 'none';
+    $('fanKeyOn').style.display = showFan ? '' : 'none';
+    const n = h.count || 0;
+    const note = $('chartNote');
+    note.textContent = '';
+    if (n) {
+      const a = document.createElement('a');
+      a.href = '#samples';
+      a.className = 'note-link';
+      a.textContent = n + (n === 1 ? ' sample' : ' samples');
+      a.onclick = ev => { ev.preventDefault(); toggleSamples(); };
+      note.appendChild(a);
+    } else {
+      note.textContent = 'No samples in this window yet. History starts after the clock syncs from the internet.';
+    }
     drawChart();
   } catch (e) {
     $('chartNote').textContent = 'Could not load history.';
   }
 }
+function toggleSamples() {
+  samplesOpen = !samplesOpen;
+  $('samples').style.display = samplesOpen ? '' : 'none';
+  if (samplesOpen) { samplePage = 0; loadSamples(); }
+}
+async function loadSamples() {
+  try {
+    const h = JSON.parse(await req('/api/history?days=' + chartDays + '&page=' + samplePage));
+    sampleTotal = h.total || 0;
+    const body = $('sampleRows');
+    body.textContent = '';
+    (h.samples || []).forEach(p => {
+      const tr = document.createElement('tr');
+      [clock(p[0]), mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C', mark(p) + Number(p[2]).toFixed(1) + '%'].forEach(text => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    const pages = Math.max(1, Math.ceil(sampleTotal / PAGE_SIZE));
+    $('samplePage').textContent = 'Page ' + (samplePage + 1) + ' of ' + pages;
+    $('samplePrev').disabled = samplePage <= 0;
+    $('sampleNext').disabled = (samplePage + 1) * PAGE_SIZE >= sampleTotal;
+  } catch (e) {
+    $('sampleRows').textContent = '';
+  }
+}
+function sampleStep(d) {
+  samplePage = Math.max(0, samplePage + d);
+  loadSamples();
+}
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '\u2014';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return Math.round(n / 1024) + ' KB';
+  const mb = n / 1048576;
+  return (mb >= 10 ? Math.round(mb) : mb.toFixed(1)) + ' MB';
+}
+function paintMeter(barId, textId, used, free) {
+  const known = used !== null && used !== undefined && free !== null && free !== undefined;
+  const total = known ? used + free : 0;
+  $(barId).style.width = total > 0 ? Math.min(100, used / total * 100) + '%' : '0';
+  $(textId).textContent = known ? fmtBytes(used) + ' / ' + fmtBytes(total) : '\u2014';
+}
+function diffText(avg, cur, unit) {
+  const d = cur - avg;
+  const sign = d >= 0 ? '+' : '';
+  return '\u00d8 ' + avg.toFixed(1) + unit + ' \u00b7 ' + sign + d.toFixed(1);
+}
+function fanLine(s) {
+  if (s.fan_on) return s.mode + ' \u00b7 ' + fmt(s.remaining_s) + ' left';
+  if (!s.time_synced) return 'Waiting for clock';
+  if (s.next_run_s !== null && s.next_run_s !== undefined) return 'Next scheduled run in ' + fmt(s.next_run_s);
+  return 'Schedule off';
+}
+function paintDays(str) {
+  const box = $('days');
+  box.textContent = '';
+  const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  names.forEach((name, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'day' + (!str || str.charAt(i) !== '0' ? ' on' : '');
+    b.textContent = name;
+    b.onclick = () => b.classList.toggle('on');
+    box.appendChild(b);
+  });
+}
+function dayString() {
+  let s = '';
+  document.querySelectorAll('#days .day').forEach(b => { s += b.classList.contains('on') ? '1' : '0'; });
+  return s;
+}
+function paintSlots(str) {
+  const box = $('slots');
+  box.textContent = '';
+  for (let row = 0; row < 2; row++) {
+    const labels = document.createElement('div');
+    labels.className = 'hours';
+    const grid = document.createElement('div');
+    grid.className = 'slots';
+    for (let hour = 0; hour < 12; hour++) {
+      const lab = document.createElement('span');
+      lab.textContent = String(row * 12 + hour).padStart(2, '0');
+      labels.appendChild(lab);
+      for (let half = 0; half < 2; half++) {
+        const i = (row * 12 + hour) * 2 + half;
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'slot' + (str && str.charAt(i) === '1' ? ' on' : '');
+        b.setAttribute('aria-label', String(row * 12 + hour).padStart(2, '0') + (half ? ':30' : ':00'));
+        b.onclick = () => b.classList.toggle('on');
+        grid.appendChild(b);
+      }
+    }
+    box.appendChild(labels);
+    box.appendChild(grid);
+  }
+}
+function slotString() {
+  let s = '';
+  document.querySelectorAll('#slots .slot').forEach(b => { s += b.classList.contains('on') ? '1' : '0'; });
+  return s;
+}
 async function refresh() {
   try {
     const s = JSON.parse(await req('/api/status'));
+    $('time').textContent = s.time || '';
+    $('tz').textContent = s.timezone || '';
     $('fanBig').textContent = s.fan_on ? 'ON' : 'OFF';
     $('fanBig').className = 'big ' + (s.fan_on ? 'on' : 'off');
-    $('fanSub').textContent = s.mode + (s.fan_on ? ' · ' + fmt(s.remaining_s) + ' left' : '');
+    $('fanSub').textContent = fanLine(s);
     if (s.temp_c === null || s.temp_c === undefined) {
-      $('tempBig').textContent = '—';
-      $('tempSub').textContent = s.sensor_error ? 'unavailable' : 'waiting…';
-      $('humBig').textContent = '—';
-      $('humSub').textContent = s.sensor_error ? 'unavailable' : 'waiting…';
+      $('tempBig').textContent = '\u2014';
+      $('tempSub').textContent = s.sensor_error ? 'unavailable' : 'waiting\u2026';
+      $('humBig').textContent = '\u2014';
+      $('humSub').textContent = s.sensor_error ? 'unavailable' : 'waiting\u2026';
     } else {
-      $('tempBig').textContent = s.temp_c.toFixed(1) + ' °C';
+      $('tempBig').textContent = s.temp_c.toFixed(1) + ' \u00b0C';
       $('humBig').textContent = s.humidity.toFixed(1) + '%';
-      $('tempSub').textContent = s.sensor_ok ? 'air temperature' : 'stale reading';
-      $('humSub').textContent = s.sensor_ok ? 'relative humidity' : 'stale reading';
+      if (s.temp_avg === null || s.temp_avg === undefined) {
+        $('tempSub').textContent = s.sensor_ok ? 'air temperature' : 'stale reading';
+        $('humSub').textContent = s.sensor_ok ? 'relative humidity' : 'stale reading';
+      } else {
+        $('tempSub').textContent = diffText(s.temp_avg, s.temp_c, ' \u00b0C');
+        $('humSub').textContent = diffText(s.hum_avg, s.humidity, '%');
+      }
     }
-    $('mode').textContent = s.mode;
-    $('left').textContent = fmt(s.remaining_s);
-    $('next').textContent = s.next_run_s === null ? '' : 'in ' + fmt(s.next_run_s);
-    $('sched').textContent = s.schedule;
-    $('manual').textContent = s.manual;
-    $('time').textContent = s.time;
-    show('left', s.fan_on);
-    show('next', s.next_run_s !== null);
-    $('btn').textContent = s.fan_on ? 'Stop fan' : 'Start for ' + s.manual_min + ' min';
-    $('btn').className = s.fan_on ? 'stop' : '';
+    paintMeter('memBar', 'memLine', s.mem_used, s.mem_free);
+    paintMeter('storeBar', 'storeLine', s.storage_used, s.storage_free);
+    $('mistAgo').textContent = ago(s.last_mist);
+    $('feedAgo').textContent = ago(s.last_feed);
+    $('btn').setAttribute('aria-label', s.fan_on ? 'Stop fan' : 'Start for ' + s.manual_min + ' min');
+    $('btn').className = 'card fan-card' + (s.fan_on ? ' stop' : '');
     $('btn').disabled = false;
     if (!formLoaded) {
-      $('dur').value = s.duration_min; $('per').value = s.period_min; $('man').value = s.manual_min;
-      $('sint').value = s.sensor_interval_s; $('lkeep').value = s.log_keep;
-      $('hdays').value = s.history_days;
+      $('man').value = s.manual_min;
+      $('sint').value = s.sensor_interval_min;
+      $('lkeep').value = s.log_keep;
+      paintDays(s.weekdays || '');
+      paintSlots(s.segments || '');
       formLoaded = true;
     }
     const logs = await req('/api/logs');
-    $('log').textContent = logs.trim() ? logs.trim().split('\\n').reverse().join('\\n') : 'No log entries yet.';
+    $('log').textContent = logs.trim() ? logs.trim().split(NL).reverse().join(NL) : 'No log entries yet.';
+    const m = JSON.parse(await req('/api/maintenance'));
+    maintEvents = m.events || [];
+    renderMaint();
   } catch (e) {
-    $('fanBig').textContent = '—';
+    $('fanBig').textContent = '\u2014';
     $('fanBig').className = 'big err';
     $('fanSub').textContent = 'Device unreachable';
     $('btn').disabled = true;
@@ -977,23 +1728,90 @@ async function refresh() {
 }
 async function press() {
   $('btn').disabled = true;
-  try { await req('/api/button', {method: 'POST'}); } catch (e) {}
+  try { await req('/api/button', {method:'POST'}); } catch (e) {}
   refresh();
 }
-async function saveSchedule() {
-  $('schedMsg').textContent = 'Saving…'; $('schedMsg').className = 'muted';
+function maintRow(ev) {
+  const names = {mist:'Mist', feed:'Feed', soil:'Soil', deco:'Deco', note:'Note'};
+  const row = document.createElement('div');
+  const kind = document.createElement('span');
+  kind.className = 'maint-kind';
+  kind.textContent = names[ev[1]] || ev[1];
+  row.appendChild(kind);
+  if (ev[1] === 'note' && ev[2]) row.appendChild(document.createTextNode(': ' + ev[2]));
+  const date = document.createElement('span');
+  date.className = 'maint-date';
+  date.textContent = clock(ev[0]);
+  row.appendChild(document.createTextNode(' \u00b7 ' + ago(ev[0]) + ' \u00b7 '));
+  row.appendChild(date);
+  return row;
+}
+function renderMaint() {
+  const list = $('maintList');
+  const pager = $('maintPager');
+  list.textContent = '';
+  const n = maintEvents.length;
+  if (!n) {
+    list.className = 'maint-list muted';
+    list.textContent = 'Nothing recorded yet.';
+    pager.style.display = 'none';
+    return;
+  }
+  const pages = Math.ceil(n / MAINT_PAGE);
+  if (maintPage >= pages) maintPage = pages - 1;
+  if (maintPage < 0) maintPage = 0;
+  list.className = 'maint-list';
+  maintEvents.slice(maintPage * MAINT_PAGE, maintPage * MAINT_PAGE + MAINT_PAGE).forEach(ev => {
+    list.appendChild(maintRow(ev));
+  });
+  pager.style.display = pages > 1 ? 'flex' : 'none';
+  $('maintPage').textContent = 'Page ' + (maintPage + 1) + ' of ' + pages;
+  $('maintPrev').disabled = maintPage <= 0;
+  $('maintNext').disabled = maintPage + 1 >= pages;
+}
+function maintStep(d) {
+  maintPage = Math.max(0, maintPage + d);
+  renderMaint();
+}
+async function maint(kind) {
+  $('maintMsg').textContent = '';
+  $('maintMsg').className = 'muted';
   try {
-    await req('/api/schedule', {method: 'POST', body: JSON.stringify({
-      duration_min: +$('dur').value, period_min: +$('per').value, manual_min: +$('man').value})});
+    await req('/api/maintenance', {method:'POST', body:JSON.stringify({kind:kind})});
+    maintPage = 0;
+    refresh();
+  } catch (e) {
+    $('maintMsg').textContent = e.message;
+    $('maintMsg').className = 'err';
+  }
+}
+async function addNote() {
+  $('noteMsg').textContent = '';
+  $('noteMsg').className = 'muted';
+  try {
+    await req('/api/maintenance', {method:'POST', body:JSON.stringify({kind:'note', text:$('noteText').value})});
+    $('noteText').value = '';
+    maintPage = 0;
+    refresh();
+  } catch (e) {
+    $('noteMsg').textContent = e.message;
+    $('noteMsg').className = 'err';
+  }
+}
+async function saveSchedule() {
+  $('schedMsg').textContent = 'Saving\u2026'; $('schedMsg').className = 'muted';
+  try {
+    await req('/api/schedule', {method:'POST', body:JSON.stringify({
+      segments: slotString(), weekdays: dayString(), manual_min: +$('man').value})});
     $('schedMsg').textContent = 'Saved.';
     refresh();
   } catch (e) { $('schedMsg').textContent = e.message; $('schedMsg').className = 'err'; }
 }
 async function saveAdvanced() {
-  $('advMsg').textContent = 'Saving…'; $('advMsg').className = 'muted';
+  $('advMsg').textContent = 'Saving\u2026'; $('advMsg').className = 'muted';
   try {
-    await req('/api/settings', {method: 'POST', body: JSON.stringify({
-      sensor_interval_s: +$('sint').value, log_keep: +$('lkeep').value, history_days: +$('hdays').value})});
+    await req('/api/settings', {method:'POST', body:JSON.stringify({
+      sensor_interval_min: +$('sint').value, log_keep: +$('lkeep').value})});
     $('advMsg').textContent = 'Saved.';
     refresh();
     loadHistory();
@@ -1001,9 +1819,9 @@ async function saveAdvanced() {
 }
 async function purgeHistory() {
   if (!confirm('Delete all climate and fan history on the device? The chart will be empty.')) return;
-  $('advMsg').textContent = 'Purging…'; $('advMsg').className = 'muted';
+  $('advMsg').textContent = 'Purging\u2026'; $('advMsg').className = 'muted';
   try {
-    await req('/api/purge-history', {method: 'POST'});
+    await req('/api/purge-history', {method:'POST'});
     $('advMsg').textContent = 'Climate history purged.';
     refresh();
     loadHistory();
@@ -1011,13 +1829,29 @@ async function purgeHistory() {
 }
 async function purgeLog() {
   if (!confirm('Delete all log lines on the device?')) return;
-  $('advMsg').textContent = 'Purging…'; $('advMsg').className = 'muted';
+  $('advMsg').textContent = 'Purging\u2026'; $('advMsg').className = 'muted';
   try {
-    await req('/api/purge-log', {method: 'POST'});
+    await req('/api/purge-log', {method:'POST'});
     $('advMsg').textContent = 'Log purged.';
     refresh();
   } catch (e) { $('advMsg').textContent = e.message; $('advMsg').className = 'err'; }
 }
+async function purgeMaint() {
+  if (!confirm('Delete all maintenance history on the device?')) return;
+  $('advMsg').textContent = 'Purging\u2026'; $('advMsg').className = 'muted';
+  try {
+    await req('/api/purge-maintenance', {method:'POST'});
+    $('advMsg').textContent = 'Maintenance purged.';
+    refresh();
+  } catch (e) { $('advMsg').textContent = e.message; $('advMsg').className = 'err'; }
+}
+const chartEl = $('chart');
+chartEl.addEventListener('pointermove', e => { if (e.pointerType === 'mouse' && !tipPinned) showTip(e, false); });
+chartEl.addEventListener('pointerdown', e => showTip(e, e.pointerType !== 'mouse'));
+chartEl.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !tipPinned) hideTip(); });
+addEventListener('pointerdown', e => {
+  if (tipPinned && e.target !== chartEl) hideTip();
+});
 refresh();
 loadHistory();
 setInterval(refresh, 3000);
@@ -1107,14 +1941,19 @@ def handle(conn, method, path, qs, body, now):
     send(conn, "200 OK", "text/plain; charset=utf-8", "\n".join(log_lines))
   elif method == "GET" and path == "/api/history":
     days = query_int(qs, "days", 7)
-    send(conn, "200 OK", "application/json", json.dumps(history_json(days)))
+    page = query_int(qs, "page", -1)
+    if "page=" not in qs:
+      page = None
+    send(conn, "200 OK", "application/json", json.dumps(history_json(days, page)))
+  elif method == "GET" and path == "/api/maintenance":
+    send(conn, "200 OK", "application/json", json.dumps(maintenance_json()))
   elif method == "POST" and path == "/api/button":
     toggle_fan(now, "Web")
     send(conn, "200 OK", "application/json", json.dumps(status(now)))
   elif method == "POST" and path == "/api/schedule":
     try:
       data = json.loads(body.decode())
-      save_schedule(int(data["period_min"]), int(data["duration_min"]), int(data["manual_min"]))
+      save_schedule(str(data["segments"]), int(data["manual_min"]), str(data["weekdays"]))
     except (ValueError, KeyError, TypeError) as e:
       send(conn, "400 Bad Request", "text/plain", str(e) or "Invalid schedule.")
       return
@@ -1122,16 +1961,28 @@ def handle(conn, method, path, qs, body, now):
   elif method == "POST" and path == "/api/settings":
     try:
       data = json.loads(body.decode())
-      save_settings(int(data["sensor_interval_s"]), int(data["log_keep"]), int(data["history_days"]))
+      save_settings(int(data["sensor_interval_min"]), int(data["log_keep"]))
     except (ValueError, KeyError, TypeError) as e:
       send(conn, "400 Bad Request", "text/plain", str(e) or "Invalid settings.")
       return
     send(conn, "200 OK", "application/json", json.dumps(status(now)))
+  elif method == "POST" and path == "/api/maintenance":
+    try:
+      data = json.loads(body.decode())
+      text = data.get("text", "")
+      record_maintenance(str(data["kind"]), "" if text is None else str(text))
+    except (ValueError, KeyError, TypeError) as e:
+      send(conn, "400 Bad Request", "text/plain", str(e) or "Invalid maintenance.")
+      return
+    send(conn, "200 OK", "application/json", json.dumps(maintenance_json()))
   elif method == "POST" and path == "/api/purge-log":
     purge_log()
     send(conn, "200 OK", "application/json", json.dumps(status(now)))
   elif method == "POST" and path == "/api/purge-history":
     purge_history()
+    send(conn, "200 OK", "application/json", json.dumps(status(now)))
+  elif method == "POST" and path == "/api/purge-maintenance":
+    purge_maintenance()
     send(conn, "200 OK", "application/json", json.dumps(status(now)))
   else:
     send(conn, "404 Not Found", "text/plain", "Not found")
@@ -1172,7 +2023,7 @@ _cause = machine.reset_cause()
 log("Terrarium Climate Controller starting (ESP32-C3), reset cause: %s" % RESET_CAUSE_NAMES.get(_cause, _cause))
 log("Pins: fan=GPIO%d  button=GPIO%d  sensor=GPIO%d" % (FAN_GPIO, BTN_GPIO, DHT_GPIO))
 log("Schedule: %s" % schedule_text())
-log("Settings: sensor every %ds, keep %d log lines, %dd climate history." % (sensor_interval_ms // SECOND, log_keep, history_days))
+log("Settings: sensor every %d min, keep %d log lines." % (sensor_interval_ms // MINUTE, log_keep))
 
 # Safe mode: holding the button during power-up/reset skips the controller and
 # leaves the board at the REPL, so Thonny/mpremote can always get back in.
@@ -1192,7 +2043,9 @@ print("Waiting %s before enabling the fan..." % fmt_duration(STARTUP_DELAY_MS))
 utime.sleep_ms(STARTUP_DELAY_MS)
 load_history()
 load_fan_runs()
-epoch = utime.ticks_ms()
+load_maintenance()
+log_memory()
+mem_logged_at = utime.ticks_ms()
 
 log("Controller ready.")
 
@@ -1203,8 +2056,12 @@ try:
   while True:
     now = utime.ticks_ms()
 
+    refresh_tz()
     wifi_poll(now)
     sensor_poll(now)
+    if utime.ticks_diff(now, mem_logged_at) >= MEM_LOG_MS:
+      log_memory()
+      mem_logged_at = now
 
     # 1. Check Manual Run Expiration
     if manual_running and utime.ticks_diff(now, manual_start) >= manual_ms:
@@ -1222,24 +2079,24 @@ try:
     web_poll(now)
 
     # 4. Schedule state + logging of scheduled starts/ends
-    sched_running, in_window, _ = schedule_state(now)
+    sched_running, in_slot, _ = schedule_state(now)
     if sched_running and not sched_was_running:
-      log("Scheduled %s run started." % fmt_duration(duration_ms))
-    elif sched_was_running and not sched_running and not in_window:
+      log("Scheduled run started.")
+    elif sched_was_running and not sched_running and not in_slot:
       log("Scheduled run finished.")
     sched_was_running = sched_running
 
-    # 5. Drive Fan Output
+    # 5. Drive Fan Output. Schedule wins, so an on-demand run splits when a slot starts.
     fan_active = sched_running or manual_running
     if fan_active and not fan_was_active:
       # Also blank when a scheduled run starts the fan for the same reason
       btn_blank_start = now
     fan_was_active = fan_active
     fan_pin.value(1 if fan_active else 0)
-    track_fan_run(fan_active)
+    track_fan_run(fan_active, manual_running and not sched_running)
 
     utime.sleep_ms(LOOP_MS)
 finally:
   fan_pin.value(0)
-  track_fan_run(False)
+  track_fan_run(False, False)
   log("Program stopped: fan OFF.")

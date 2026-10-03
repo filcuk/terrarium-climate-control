@@ -2,9 +2,9 @@
 
 MicroPython controller that runs a fan on a schedule, with a push button and a small web page for starting and stopping it.
 
-- **Schedule:** the fan runs for a set time at the start of every cycle. By default it runs 5 minutes every hour.
-- **Button:** if the fan is on, it stops, and the scheduled run stays off until the next cycle. If the fan is off, it starts an on-demand run (5 minutes by default).
-- **Web page:** shows temperature, humidity, fan status, lets you edit the schedule, has a start/stop button that works like the physical one, and shows the last 100 log lines.
+- **Schedule:** the fan runs during the half-hours you select, on the days you select, in local time. By default that is every day, 08:00–14:00. Summer time follows the timezone in `wifi.cfg`.
+- **Button:** if the fan is on, it stops, and that scheduled stretch stays off until it would have ended. If the fan is off, it starts an on-demand run (5 minutes by default).
+- **Web page:** shows temperature, humidity, fan status, the schedule, mist and feed times, a climate chart, and the log.
 - **Sensor:** 4-pin ASAIR AM2302 for air temperature and relative humidity.
 
 
@@ -14,19 +14,19 @@ MicroPython controller that runs a fan on a schedule, with a push button and a s
 
 | Function    | ESP32-C3 GPIO | Notes                                 |
 | ----------- | ------------- | ------------------------------------- |
-| Fan drive   | **GPIO5**     | HIGH = fan on (via transistor/MOSFET) |
-| Fan LED     | **GPIO5**     | 330 Ω series resistor; lit when the fan is on |
-| Button      | **GPIO4**     | Momentary to GND, internal pull-up    |
-| AM2302 data | **GPIO6**     | Temperature / humidity sensor         |
+| Fan drive   | **GPIO21**    | HIGH = fan on (via transistor/MOSFET) |
+| Fan LED     | **GPIO21**    | 330 Ω series resistor; lit when the fan is on |
+| Button      | **GPIO5**     | Momentary to GND, internal pull-up    |
+| AM2302 data | **GPIO1**     | Temperature / humidity sensor         |
 
 
-Change `FAN_GPIO` / `BTN_GPIO` / `DHT_GPIO` at the top of `main.py` if you need different pins. Prefer GPIO 3–7; avoid GPIO 8/9 on many C3 boards (boot / USB-JTAG).
+Change `FAN_GPIO` / `BTN_GPIO` / `DHT_GPIO` at the top of `main.py` if you need different pins. Avoid GPIO 8/9 on many C3 boards (boot / USB-JTAG).
 
 ## Wiring
 
 ![ESP32-C3 wiring diagram](docs/wiring.svg)
 
-One USB cable powers both the board and the fan. An LED on the GPIO5 control line lights while the fan is on.
+One USB cable powers both the board and the fan. An LED on the GPIO21 control line lights while the fan is on.
 
 ### Parts
 
@@ -49,14 +49,14 @@ One USB cable powers both the board and the fan. An LED on the GPIO5 control lin
 1. **Board 5V** → **fan +** (red wire)
 2. **Fan −** → **2N2222 collector (C)**
 3. **2N2222 emitter (E)** → **GND**
-4. **GPIO5** → **R1 (1 kΩ)** → **2N2222 base (B)**
+4. **GPIO21** → **R1 (1 kΩ)** → **2N2222 base (B)**
 5. **2N2222 base (B)** → **R2 (10 kΩ)** → **GND**
-6. **GPIO5** → **R4 (330 Ω)** → **LED anode** (long leg); **LED cathode** (short leg) → **GND**
+6. **GPIO21** → **R4 (330 Ω)** → **LED anode** (long leg); **LED cathode** (short leg) → **GND**
 7. **Diode** across the fan: **striped end → fan +**, plain end → fan −
-8. **GPIO4** → **button** → **GND** (on a 4-leg button, use legs that are diagonally opposite)
+8. **GPIO5** → **button** → **GND** (on a 4-leg button, use legs that are diagonally opposite)
 9. Wire the AM2302 (see below)
 
-R4 ties to GPIO5 on the board side of R1, the same signal that drives the transistor base. The LED lights only while the fan is on.
+R4 ties to GPIO21 on the board side of R1, the same signal that drives the transistor base. The LED lights only while the fan is on.
 
 Every GND connection goes to the same board GND pin.
 
@@ -70,13 +70,13 @@ With the grille facing you and the pins pointing down, left to right is usually:
 
 ```
 1 VDD   ---------- Board 3V3
-2 DATA  ---------- GPIO6
+2 DATA  ---------- GPIO1
                \-- R3: 4.7 kΩ or 10 kΩ to 3V3  (pull-up)
 3 NC    ---------- leave unconnected
 4 GND   ---------- Board GND
 ```
 
-Use **3V3**, not the board 5V pin. Keep the sensor wires reasonably short (under about 1 m). The controller reads the sensor every 10 seconds and writes a climate line into the log every 5 minutes.
+Use **3V3**, not the board 5V pin. Keep the sensor wires reasonably short (under about 1 m). The controller reads the sensor every 15 minutes by default (5 minutes is the shortest). A failed read is written to the log. Successful readings stay in the climate history.
 
 **Check the 2N2222's pinout before wiring.** Different makers order the C, B and E legs differently. For example, PN2222A is E-B-C and P2N2222A is C-B-E, read with the flat face toward you and legs pointing down. Look up the datasheet for the part number printed on yours.
 
@@ -89,11 +89,12 @@ If the fan stutters, or the board resets when the fan starts, the fan is drawing
 | -------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `main.py`      | yes            | The controller. Runs automatically on power-up.                                                                        |
 | `wifi.cfg`     | yes            | WiFi credentials. Copy `wifi.cfg.example`, fill it in, and save it on the board as `wifi.cfg`.                         |
-| `schedule.cfg` | no             | Created when you save the schedule from the web page. Delete it to go back to the defaults.                            |
+| `schedule.cfg` | no             | Created when you save the schedule from the web page. Delete it to go back to every day, 08:00–14:00.                   |
 | `settings.cfg` | no             | Sensor interval and log size, saved from Advanced on the web page.                                                     |
-| `events.log`   | no             | Rolling log (was `fan.log` in earlier versions; renamed automatically). How many lines are kept is set under Advanced. |
-| `climate.hist` | no             | Temperature/humidity samples for the chart (1-7 days, set under Advanced).                                             |
-| `fan.hist`     | no             | Fan run start/end times, drawn as hatched bands on the chart.                                                          |
+| `events.log`   | no             | Rolling log (was `fan.log` in earlier versions; renamed automatically). How many lines are kept is set under Advanced (default 100, max 250). |
+| `climate.hist` | no             | Temperature and humidity. The last day is kept as read; older samples are averaged (1 hour, then 4 hours, then 12 hours) and dropped after 30 days. |
+| `fan.hist`     | no             | Fan run start/end times for the last 7 days, drawn as hatched bands on the chart.                                      |
+| `maintenance.hist` | no         | Mist, feed, soil, decoration, and notes. Kept for 30 days, or the newest 100 if there are more. The page shows five at a time. |
 
 
 `wifi.cfg`:
@@ -102,12 +103,12 @@ If the fan stutters, or the board resets when the fan starts, the fan is drawing
 ssid=YourNetworkName
 password=YourWifiPassword
 hostname=terrarium1
-utc_offset_hours=0
+timezone=Europe/London
 ```
 
 `hostname` is optional and defaults to `terrarium`. It makes the page available at `http://terrarium1.local/` as well as at the IP address. Use letters, digits and hyphens only, and give each board a different name. `.local` addresses work on Windows 10 and later, macOS, iOS and most Linux systems. Some Android phones don't support them; use the IP address there.
 
-`utc_offset_hours` is also optional. It only shifts the timestamps in the log; the schedule doesn't depend on the clock.
+`timezone` sets local time for the schedule, the log, and the chart. Summer time is applied for the built-in zones: `UTC`, `Europe/London`, `Europe/Paris`, `America/New_York`, `America/Chicago`, `America/Denver`, and `America/Los_Angeles`. The default is `Europe/London`. An older file that only has `utc_offset_hours` keeps that fixed offset and does not follow summer time.
 
 ## Flash / run
 
@@ -116,6 +117,14 @@ utc_offset_hours=0
 3. Reset the board. Once it's on WiFi, the log shows a line like:
   `WiFi: connected. Device IP: 192.168.1.42  ->  http://192.168.1.42/`
 4. Open that address in a browser on the same network.
+
+To look at the page on this computer, without the board:
+
+```bash
+python preview.py
+```
+
+That serves the page at `http://127.0.0.1:8080/` with sample readings.
 
 ```bash
 mpremote connect auto cp main.py :main.py
@@ -132,13 +141,16 @@ The web page has no password. Anyone on your network can open it.
 ## Behaviour summary
 
 
-| Event                              | Result                                                       |
-| ---------------------------------- | ------------------------------------------------------------ |
-| Boot into schedule window          | Fan runs until window ends                                   |
-| Button or web button while fan on  | Fan stops; that scheduled run stays off until the next cycle |
-| Button or web button while fan off | On-demand run                                                |
-| On-demand run ends                 | Fan off until the next scheduled run or button press         |
-| Schedule saved on the web page     | Applies immediately and is kept after a reboot               |
+| Event                              | Result                                                                 |
+| ---------------------------------- | ---------------------------------------------------------------------- |
+| Clock not synced yet               | Schedule stays off. The fan card says "Waiting for clock". On-demand still works. |
+| Inside a selected half-hour on a selected day | Fan runs until that stretch ends, or at midnight if the next day is off |
+| Selected 23:30 and 00:00, both days on | One run from 23:30 to 00:30                                       |
+| A day left off                     | The fan stays off that day. The next run is the next selected day.    |
+| Button or web button while fan on  | Fan stops for the rest of that stretch. A reboot can start it again.  |
+| Button or web button while fan off | On-demand run                                                          |
+| On-demand still running when a selected half-hour starts | The history closes the on-demand run and opens a scheduled one. The fan stays on. |
+| Schedule saved on the web page     | Applies immediately and is kept after a reboot                         |
 
 
 ## Troubleshooting

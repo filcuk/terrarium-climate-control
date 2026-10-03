@@ -9,9 +9,9 @@
   <g font-size="15" font-weight="bold" fill="#fff" text-anchor="end">
     <text x="190" y="105">5V</text>
     <text x="190" y="195">3V3</text>
-    <text x="190" y="255">GPIO6</text>
-    <text x="190" y="455">GPIO5</text>
-    <text x="190" y="560">GPIO4</text>
+    <text x="190" y="255">GPIO1</text>
+    <text x="190" y="455">GPIO21</text>
+    <text x="190" y="560">GPIO5</text>
     <text x="190" y="640">GND</text>
   </g>
   <g fill="#f2c94c" stroke="#333" stroke-width="1.5">
@@ -28,7 +28,7 @@
   <line x1="940" y1="100" x2="940" y2="135" stroke="#d62828" stroke-width="4"/>
   <circle cx="940" cy="100" r="5" fill="#d62828"/>
 
-  <!-- 3V3 to AM2302 VDD, GPIO6 to DATA, R3 pull-up -->
+  <!-- 3V3 to AM2302 VDD, GPIO1 to DATA, R3 pull-up -->
   <line x1="210" y1="190" x2="524" y2="190" stroke="#9b2226" stroke-width="4"/>
   <line x1="210" y1="250" x2="524" y2="250" stroke="#0a9396" stroke-width="4"/>
   <circle cx="370" cy="190" r="5" fill="#9b2226"/>
@@ -105,7 +105,7 @@
     <text x="956" y="498">E</text>
   </g>
 
-  <!-- GPIO5 fan control, R1 to base -->
+  <!-- GPIO21 fan control, R1 to base -->
   <line x1="210" y1="450" x2="600" y2="450" stroke="#f08c00" stroke-width="4"/>
   <polyline points="600,450 608,436 623,464 638,436 653,464 668,436 676,450" fill="none" stroke="#333" stroke-width="3"/>
   <line x1="676" y1="450" x2="906" y2="450" stroke="#f08c00" stroke-width="4"/>
@@ -121,7 +121,7 @@
   <rect x="652" y="582" width="108" height="24" rx="5" fill="#fff3d6" stroke="#f08c00"/>
   <text x="706" y="599" text-anchor="middle" font-size="13" font-weight="bold" fill="#222">R2 = 10 k&#937;</text>
 
-  <!-- LED from GPIO5, before R1 -->
+  <!-- LED from GPIO21, before R1 -->
   <circle cx="430" cy="450" r="6" fill="#f08c00"/>
   <line x1="430" y1="450" x2="430" y2="478" stroke="#f08c00" stroke-width="4"/>
   <polyline points="430,478 416,492 444,506 416,520 444,534 430,546" fill="none" stroke="#333" stroke-width="3"/>

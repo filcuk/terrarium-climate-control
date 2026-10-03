@@ -3,4 +3,7 @@ events.log
 schedule.cfg
 settings.cfg
 climate.hist
+fan.hist
+maintenance.hist
 /device
+/__pycache__

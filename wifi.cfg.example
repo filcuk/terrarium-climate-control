@@ -6,5 +6,7 @@ password=YourWifiPassword
 # Letters, digits and hyphens only. Defaults to "terrarium".
 hostname=terrarium1
 
-# Optional: hours to add to UTC for log timestamps (e.g. 1 for UTC+1, -5 for UTC-5)
-utc_offset_hours=0
+# Optional: local timezone. Summer time is applied for the built-in names.
+# UTC, Europe/London, Europe/Paris, America/New_York, America/Chicago,
+# America/Denver, America/Los_Angeles. Default is Europe/London.
+timezone=Europe/London
