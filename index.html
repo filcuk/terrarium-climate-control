@@ -1,0 +1,689 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terrarium Climate Control</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:0 auto;padding:16px;background:#eef2ee;color:#1b1f1b}
+.title-row{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:4px 0 16px}
+h1{font-size:1.45em;margin:0}
+.meters{display:flex;flex-direction:column;gap:5px;flex:1;min-width:150px;max-width:340px;margin:0 8px}
+.meter{display:grid;grid-template-columns:2.2em minmax(48px,1fr) auto;align-items:center;gap:6px;color:#666;font-size:.72em}
+.bar{height:7px;background:#e4ece4;border-radius:99px;overflow:hidden}
+.bar div{height:100%;width:0;background:#2d6a4f}
+.meter .nums{white-space:nowrap}
+.device-time{color:#666;font-size:.85em;text-align:right;white-space:nowrap;line-height:1.35}
+h2{font-size:1.05em;margin:0 0 12px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
+@media(max-width:640px){.cards{grid-template-columns:1fr}.device-time{white-space:normal}}
+.card{background:#fff;border-radius:14px;padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.cards .card{margin-bottom:0}
+button.fan-card{display:block;width:100%;text-align:left;font:inherit;color:#1b1f1b;cursor:pointer}
+button.fan-card:hover{background:#f3f8f4}
+button.fan-card.stop{background:#fff;box-shadow:inset 0 0 0 2px #c0392b,0 1px 3px rgba(0,0,0,.12)}
+button.fan-card:disabled{cursor:default}
+.kicker{font-size:.8em;color:#666;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.big{font-size:1.7em;font-weight:700;line-height:1.15}
+.sub{color:#666;font-size:.9em;margin-top:6px;min-height:1.2em}
+.on{color:#2d6a4f}.off{color:#777}.err{color:#c0392b}.temp{color:#b35c00}.hum{color:#1d4e89}
+.muted{color:#666;font-size:.92em}
+button,.btn{font-size:.95em;font-weight:600;padding:10px 16px;border:0;border-radius:10px;background:#2d6a4f;color:#fff;cursor:pointer}
+button.stop{background:#c0392b}
+button.secondary{background:#dde5dd;color:#1b1f1b}
+button:disabled{opacity:.5}
+.seg{display:inline-flex;gap:4px;background:#e8eee8;padding:3px;border-radius:10px;flex-wrap:wrap}
+.seg button{background:transparent;color:#334;padding:7px 12px;box-shadow:none}
+.seg button.active{background:#fff;color:#1b1f1b}
+.chart-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.legend{display:flex;gap:14px;font-size:.85em;color:#555;flex-wrap:wrap}
+.swatch{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:middle}
+.hatch{border:1px solid #9cc3ad;background:repeating-linear-gradient(45deg,#7fb08f 0 1px,#e6f1ea 1px 4px),#e6f1ea}
+.hatch-x{border:1px solid #9cc3ad;background:repeating-linear-gradient(45deg,#7fb08f 0 1px,transparent 1px 4px),repeating-linear-gradient(-45deg,#7fb08f 0 1px,transparent 1px 4px),#e6f1ea}
+.chart-wrap{position:relative}
+canvas{width:100%;height:220px;display:block;background:#fafcfa;border-radius:10px;touch-action:manipulation}
+.tip{position:absolute;background:#1b1f1b;color:#fff;padding:8px 10px;border-radius:8px;font-size:.8em;pointer-events:none;white-space:pre;z-index:2;display:none}
+.note-link{color:#1d4e89;cursor:pointer;text-decoration:underline}
+.chart-foot{display:flex;justify-content:space-between;align-items:baseline;gap:8px 16px;margin-top:8px;flex-wrap:wrap}
+.avg-tip{margin-left:auto;color:#888;font-size:.78em;white-space:nowrap}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0}
+input{width:100px;padding:8px;font-size:1em;border:1px solid #ccc;border-radius:8px}
+pre{background:#111;color:#cfe8cf;padding:12px;border-radius:10px;max-height:360px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:0}
+.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.days{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.day{height:32px;padding:0;border-radius:4px;background:#e4ece4;color:#1b1f1b;font-size:.72em}
+.day.on{background:#2d6a4f;color:#fff}
+.hours{display:grid;grid-template-columns:repeat(12,1fr);font-size:.72em;color:#666;margin-top:10px}
+.slots{display:grid;grid-template-columns:repeat(24,1fr);gap:3px}
+.slot{height:32px;padding:0;border-radius:4px;background:#e4ece4}
+.slot.on{background:#2d6a4f}
+table{width:100%;border-collapse:collapse;font-size:.9em;margin-top:8px}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
+.pager{display:flex;gap:8px;align-items:center;margin-top:8px}
+.maint-list{margin-top:14px}
+.maint-list div{padding:6px 0;border-bottom:1px solid #e4ece4}
+.maint-kind{font-weight:700}
+.maint-date{color:#999}
+.section-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.section-head h2{margin:0}
+.note-row{display:flex;gap:8px;flex:1;min-width:0}
+.note-row input{width:auto;flex:1;min-width:0}
+</style></head><body>
+<div class="title-row">
+  <h1>Terrarium Climate Control</h1>
+  <div class="meters">
+    <div class="meter"><span>Mem</span><div class="bar"><div id="memBar"></div></div><span id="memLine" class="nums"></span></div>
+    <div class="meter"><span>Sto</span><div class="bar"><div id="storeBar"></div></div><span id="storeLine" class="nums"></span></div>
+  </div>
+  <div class="device-time"><div id="time"></div><div id="tz"></div></div>
+</div>
+
+<div class="cards">
+  <button type="button" id="btn" class="card fan-card" onclick="press()" disabled>
+    <div class="kicker">Fan</div>
+    <div id="fanBig" class="big off">...</div>
+    <div id="fanSub" class="sub"></div>
+  </button>
+  <div class="card">
+    <div class="kicker">Temperature</div>
+    <div id="tempBig" class="big temp">...</div>
+    <div id="tempSub" class="sub"></div>
+  </div>
+  <div class="card">
+    <div class="kicker">Humidity</div>
+    <div id="humBig" class="big hum">...</div>
+    <div id="humSub" class="sub"></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="chart-head">
+    <h2 style="margin:0">Temperature &amp; humidity</h2>
+    <div class="seg">
+      <button id="d1" onclick="setDays(1)">1 day</button>
+      <button id="d3" onclick="setDays(3)">3 days</button>
+      <button id="d7" class="active" onclick="setDays(7)">7 days</button>
+      <button id="d30" onclick="setDays(30)">30 days</button>
+    </div>
+  </div>
+  <div class="legend"><span><span class="swatch" style="background:#b35c00"></span>Temp °C</span>
+  <span><span class="swatch" style="background:#1d4e89"></span>Humidity %RH</span>
+  <span id="fanKey"><span class="swatch hatch"></span>Fan</span>
+  <span id="fanKeyOn"><span class="swatch hatch-x"></span>On-demand fan</span></div>
+  <div class="chart-wrap">
+    <canvas id="chart"></canvas>
+    <div id="tip" class="tip"></div>
+  </div>
+  <div class="chart-foot">
+    <div id="chartNote" class="muted"></div>
+    <div class="avg-tip">After 1 day: &#216; 1h, 4h, then 12h &#183; Fan 7d</div>
+  </div>
+  <div id="samples" style="display:none">
+    <table><thead><tr><th>Time</th><th>Temperature</th><th>Humidity</th></tr></thead><tbody id="sampleRows"></tbody></table>
+    <div class="pager">
+      <button type="button" class="secondary" id="samplePrev" onclick="sampleStep(-1)">Newer</button>
+      <span id="samplePage" class="muted"></span>
+      <button type="button" class="secondary" id="sampleNext" onclick="sampleStep(1)">Older</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="section-head">
+    <h2>Maintenance</h2>
+    <div class="device-time">Mist <span id="mistAgo"></span> · Feed <span id="feedAgo"></span></div>
+  </div>
+  <div class="actions">
+    <button type="button" onclick="maint('mist')">Mist</button>
+    <button type="button" onclick="maint('feed')">Feed</button>
+    <button type="button" onclick="maint('soil')">Soil</button>
+    <button type="button" onclick="maint('deco')">Deco</button>
+    <form class="note-row" onsubmit="event.preventDefault(); addNote();">
+      <input id="noteText" type="text" maxlength="120" placeholder="Note" autocomplete="off">
+      <button>Add note</button>
+    </form>
+  </div>
+  <div id="maintMsg" class="muted"></div>
+  <div id="noteMsg" class="muted"></div>
+  <div id="maintList" class="maint-list muted">Loading…</div>
+  <div class="pager" id="maintPager" style="display:none">
+    <button type="button" class="secondary" id="maintPrev" onclick="maintStep(-1)">Newer</button>
+    <span id="maintPage" class="muted"></span>
+    <button type="button" class="secondary" id="maintNext" onclick="maintStep(1)">Older</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Ventilation Schedule</h2>
+  <div id="days" class="days"></div>
+  <div id="slots"></div>
+  <form onsubmit="event.preventDefault(); saveSchedule();">
+    <div class="row"><label for="man">On-demand run (minutes)</label><input id="man" type="number" min="1" required></div>
+    <button>Save schedule</button> <span id="schedMsg" class="muted"></span>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Advanced</h2>
+  <form onsubmit="event.preventDefault(); saveAdvanced();">
+    <div class="row"><label for="sint">Temperature readout every (minutes)</label><input id="sint" type="number" min="5" max="60" required></div>
+    <div class="row"><label for="lkeep">Log lines to keep</label><input id="lkeep" type="number" min="20" max="250" required></div>
+    <div class="actions">
+      <button>Save advanced</button>
+      <button type="button" class="secondary" onclick="purgeLog()">Purge log</button>
+      <button type="button" class="secondary" onclick="purgeHistory()">Purge climate history</button>
+      <button type="button" class="secondary" onclick="purgeMaint()">Purge maintenance</button>
+      <span id="advMsg" class="muted"></span>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Log (newest first)</h2>
+  <pre id="log">Loading…</pre>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const NL = String.fromCharCode(10);
+let formLoaded = false, chartDays = 7, chartPoints = [], chartFan = [], chartGeom = null;
+let patterns = {}, tipPinned = false, samplesOpen = false, samplePage = 0, sampleTotal = 0;
+let maintEvents = [], maintPage = 0, logKey = '', maintKey = '';
+const PAGE_SIZE = 50, MAINT_PAGE = 5;
+function hatchPattern(ctx, cross) {
+  const key = cross ? 'x' : 's';
+  if (patterns[key]) return patterns[key];
+  const p = document.createElement('canvas'), n = 8;
+  p.width = p.height = n;
+  const g = p.getContext('2d');
+  g.fillStyle = 'rgba(45,106,79,0.08)'; g.fillRect(0, 0, n, n);
+  g.strokeStyle = 'rgba(45,106,79,0.35)'; g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(0, n); g.lineTo(n, 0);
+  if (cross) { g.moveTo(0, 0); g.lineTo(n, n); }
+  g.stroke();
+  return patterns[key] = ctx.createPattern(p, 'repeat');
+}
+function fmt(s) {
+  s = Math.max(0, s | 0);
+  const h = s / 3600 | 0, m = (s % 3600) / 60 | 0, x = s % 60;
+  return (h ? h + 'h ' : '') + (h || m ? m + 'm ' : '') + x + 's';
+}
+function ago(ts) {
+  if (ts === null || ts === undefined) return 'never';
+  const s = Math.max(0, (Date.now() / 1000 - ts) | 0);
+  if (s < 60) return 'just now';
+  if (s < 3600) return (s / 60 | 0) + ' min ago';
+  if (s < 86400) {
+    const h = s / 3600 | 0;
+    return h + (h === 1 ? ' hr ago' : ' hrs ago');
+  }
+  const d = s / 86400 | 0;
+  return d + (d === 1 ? ' day ago' : ' days ago');
+}
+function clock(ts) {
+  const df = {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'};
+  return new Date(ts * 1000).toLocaleString([], df);
+}
+function mark(p) { return p[3] > 0 ? '\u00d8 ' : ''; }
+async function req(url, opts) {
+  const r = await fetch(url, opts);
+  const t = await r.text();
+  if (!r.ok) throw new Error(t);
+  return t;
+}
+function post(url, data) {
+  return req(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data || {})});
+}
+function setDays(d) {
+  chartDays = d;
+  ['d1','d3','d7','d30'].forEach(id => $(id).classList.toggle('active', id === 'd' + d));
+  samplePage = 0;
+  loadHistory();
+  if (samplesOpen) loadSamples();
+}
+function axisTicks(x0, x1, step) {
+  const out = [];
+  const d = new Date((x0 + 1) * 1000);
+  const push = () => {
+    let guard = 0;
+    while (d.getTime() / 1000 < x1 && guard++ < 900) {
+      const t = d.getTime() / 1000;
+      const prev = d.getTime();
+      if (t > x0 && t < x1) out.push(t);
+      if (step >= 86400) d.setDate(d.getDate() + (step / 86400 | 0));
+      else d.setHours(d.getHours() + (step / 3600 | 0));
+      if (d.getTime() <= prev) break;
+    }
+  };
+  if (step >= 86400) {
+    d.setHours(0, 0, 0, 0);
+    if (d.getTime() / 1000 <= x0) d.setDate(d.getDate() + (step / 86400 | 0));
+    push();
+  } else {
+    const hours = step / 3600 | 0;
+    d.setMinutes(0, 0, 0);
+    const h = d.getHours();
+    const add = (hours - (h % hours)) % hours;
+    if (add === 0 && d.getTime() / 1000 <= x0) d.setHours(h + hours);
+    else if (add) d.setHours(h + add);
+    push();
+  }
+  return out;
+}
+function axisText(ts, step, span) {
+  const d = new Date(ts * 1000);
+  if (step >= 86400) return d.toLocaleString([], {month:'short', day:'numeric'});
+  const time = d.toLocaleString([], {hour:'2-digit', minute:'2-digit'});
+  if (span > 36 * 3600) return d.toLocaleString([], {month:'short', day:'numeric'}) + ' ' + time;
+  return time;
+}
+function drawChart() {
+  const c = $('chart'), ctx = c.getContext('2d');
+  const dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const pad = {l:40, r:40, t:16, b:28};
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#fafcfa'; ctx.fillRect(0, 0, W, H);
+  const pts = chartPoints;
+  chartGeom = null;
+  if (!pts.length) {
+    ctx.fillStyle = '#888'; ctx.font = '14px system-ui';
+    ctx.fillText('No history yet. Samples are stored once the clock is synced.', pad.l, H / 2);
+    return;
+  }
+  let tMin = Infinity, tMax = -Infinity, hMin = Infinity, hMax = -Infinity;
+  pts.forEach(p => { tMin = Math.min(tMin, p[1]); tMax = Math.max(tMax, p[1]); hMin = Math.min(hMin, p[2]); hMax = Math.max(hMax, p[2]); });
+  if (tMax === tMin) { tMin -= 1; tMax += 1; }
+  if (hMax === hMin) { hMin = Math.max(0, hMin - 5); hMax = Math.min(100, hMax + 5); }
+  tMin = Math.floor(tMin) - 1; tMax = Math.ceil(tMax) + 1;
+  hMin = Math.max(0, Math.floor(hMin) - 5); hMax = Math.min(100, Math.ceil(hMax) + 5);
+  const x0 = pts[0][0], x1 = Math.max(pts[pts.length - 1][0], x0 + 1);
+  const x = ts => pad.l + (ts - x0) / Math.max(1, x1 - x0) * (W - pad.l - pad.r);
+  const yT = v => pad.t + (1 - (v - tMin) / (tMax - tMin)) * (H - pad.t - pad.b);
+  const yH = v => pad.t + (1 - (v - hMin) / (hMax - hMin)) * (H - pad.t - pad.b);
+  chartGeom = {x0, x1, pad, W, H, x, yT, yH, pts};
+  chartFan.forEach(r => {
+    if (r[1] < x0 || r[0] > x1) return;
+    const a = x(Math.max(r[0], x0)), w = x(Math.min(r[1], x1)) - a;
+    const cross = r[2] === 1;
+    ctx.fillStyle = w >= 6 ? hatchPattern(ctx, cross) : (cross ? 'rgba(45,106,79,0.45)' : 'rgba(45,106,79,0.28)');
+    ctx.fillRect(a, pad.t, Math.max(1, w), H - pad.t - pad.b);
+  });
+  ctx.strokeStyle = '#e0e6e0'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const yy = pad.t + i * (H - pad.t - pad.b) / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
+  }
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#888';
+  ctx.fillText(tMax.toFixed(0) + '\u00b0', 4, pad.t + 4);
+  ctx.fillText(tMin.toFixed(0) + '\u00b0', 4, H - pad.b);
+  ctx.textAlign = 'right';
+  ctx.fillText(hMax.toFixed(0) + '%', W - 4, pad.t + 4);
+  ctx.fillText(hMin.toFixed(0) + '%', W - 4, H - pad.b);
+  ctx.textAlign = 'left';
+  function line(color, yfn, idx) {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    pts.forEach((p, i) => { const X = x(p[0]), Y = yfn(p[idx]); i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
+    ctx.stroke();
+  }
+  line('#1d4e89', yH, 2);
+  line('#b35c00', yT, 1);
+  ctx.fillStyle = '#666';
+  const startLabel = clock(pts[0][0]), endLabel = clock(pts[pts.length - 1][0]);
+  const gap = 16;
+  const leftLimit = pad.l + ctx.measureText(startLabel).width + gap;
+  const rightLimit = W - pad.r - ctx.measureText(endLabel).width - gap;
+  const span = x1 - x0;
+  const steps = [3600, 7200, 10800, 21600, 43200, 86400, 172800, 432000, 604800];
+  let drawn = [];
+  for (let s = 0; s < steps.length && !drawn.length; s++) {
+    const step = steps[s];
+    if (step >= span * 0.9) continue;
+    const placed = [];
+    let edge = leftLimit - gap, blocked = false;
+    axisTicks(x0, x1, step).forEach(ts => {
+      if (blocked) return;
+      const text = axisText(ts, step, span);
+      const w = ctx.measureText(text).width, cx = x(ts);
+      const left = cx - w / 2, right = cx + w / 2;
+      if (left < leftLimit || right > rightLimit) return;
+      if (left < edge + gap) { blocked = true; return; }
+      placed.push({text: text, cx: cx});
+      edge = right;
+    });
+    if (!blocked && placed.length) drawn = placed;
+  }
+  ctx.fillText(startLabel, pad.l, H - 8);
+  ctx.textAlign = 'center';
+  drawn.forEach(lab => ctx.fillText(lab.text, lab.cx, H - 8));
+  ctx.textAlign = 'right';
+  ctx.fillText(endLabel, W - pad.r, H - 8);
+  ctx.textAlign = 'left';
+}
+function nearestPoint(clientX) {
+  if (!chartGeom || !chartGeom.pts.length) return null;
+  const rect = $('chart').getBoundingClientRect();
+  const px = clientX - rect.left;
+  const g = chartGeom;
+  let best = g.pts[0], bestD = Infinity;
+  g.pts.forEach(p => {
+    const d = Math.abs(g.x(p[0]) - px);
+    if (d < bestD) { best = p; bestD = d; }
+  });
+  return best;
+}
+function showTip(e, pin) {
+  const p = nearestPoint(e.clientX);
+  const tip = $('tip');
+  if (!p) { tip.style.display = 'none'; return; }
+  const g = chartGeom;
+  tip.textContent = clock(p[0]) + NL + mark(p) + p[1].toFixed(1) + ' \u00b0C' + NL + mark(p) + p[2].toFixed(1) + '%';
+  const x = g.x(p[0]), y = Math.min(g.yT(p[1]), g.yH(p[2]));
+  tip.style.left = Math.min(x + 8, g.W - 140) + 'px';
+  tip.style.top = Math.max(4, y - 56) + 'px';
+  tip.style.display = 'block';
+  if (pin) tipPinned = true;
+}
+function hideTip() {
+  tipPinned = false;
+  $('tip').style.display = 'none';
+}
+async function loadHistory() {
+  try {
+    const h = JSON.parse(await req('/api/history?days=' + chartDays));
+    chartPoints = h.points || [];
+    const showFan = chartDays <= 7;
+    chartFan = showFan && h.fan ? h.fan : [];
+    $('fanKey').style.display = showFan ? '' : 'none';
+    $('fanKeyOn').style.display = showFan ? '' : 'none';
+    const n = h.count || 0;
+    const note = $('chartNote');
+    note.textContent = '';
+    if (n) {
+      const a = document.createElement('a');
+      a.href = '#samples';
+      a.className = 'note-link';
+      a.textContent = n + (n === 1 ? ' sample' : ' samples');
+      a.onclick = ev => { ev.preventDefault(); toggleSamples(); };
+      note.appendChild(a);
+    } else {
+      note.textContent = 'No samples in this window yet. History starts after the clock syncs from the internet.';
+    }
+    drawChart();
+  } catch (e) {
+    $('chartNote').textContent = 'Could not load history.';
+  }
+}
+function toggleSamples() {
+  samplesOpen = !samplesOpen;
+  $('samples').style.display = samplesOpen ? '' : 'none';
+  if (samplesOpen) { samplePage = 0; loadSamples(); }
+}
+async function loadSamples() {
+  try {
+    const h = JSON.parse(await req('/api/history?days=' + chartDays + '&page=' + samplePage));
+    sampleTotal = h.total || 0;
+    const body = $('sampleRows');
+    body.textContent = '';
+    (h.samples || []).forEach(p => {
+      const tr = document.createElement('tr');
+      [clock(p[0]), mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C', mark(p) + Number(p[2]).toFixed(1) + '%'].forEach(text => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+    const pages = Math.max(1, Math.ceil(sampleTotal / PAGE_SIZE));
+    $('samplePage').textContent = 'Page ' + (samplePage + 1) + ' of ' + pages;
+    $('samplePrev').disabled = samplePage <= 0;
+    $('sampleNext').disabled = (samplePage + 1) * PAGE_SIZE >= sampleTotal;
+  } catch (e) {
+    $('sampleRows').textContent = '';
+  }
+}
+function sampleStep(d) {
+  samplePage = Math.max(0, samplePage + d);
+  loadSamples();
+}
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '\u2014';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return Math.round(n / 1024) + ' KB';
+  const mb = n / 1048576;
+  return (mb >= 10 ? Math.round(mb) : mb.toFixed(1)) + ' MB';
+}
+function paintMeter(barId, textId, used, free) {
+  const known = used !== null && used !== undefined && free !== null && free !== undefined;
+  const total = known ? used + free : 0;
+  $(barId).style.width = total > 0 ? Math.min(100, used / total * 100) + '%' : '0';
+  $(textId).textContent = known ? fmtBytes(used) + ' / ' + fmtBytes(total) : '\u2014';
+}
+function diffText(avg, cur, unit) {
+  const d = cur - avg;
+  const sign = d >= 0 ? '+' : '';
+  return '\u00d8 ' + avg.toFixed(1) + unit + ' \u00b7 ' + sign + d.toFixed(1);
+}
+function fanLine(s) {
+  if (s.fan_on) return s.mode + ' \u00b7 ' + fmt(s.remaining_s) + ' left';
+  if (!s.time_synced) return 'Waiting for clock';
+  if (s.next_run_s !== null && s.next_run_s !== undefined) return 'Next scheduled run in ' + fmt(s.next_run_s);
+  return 'Schedule off';
+}
+function toggleButton(cls, on, label) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls + (on ? ' on' : '');
+  b.setAttribute('aria-label', label);
+  b.onclick = () => b.classList.toggle('on');
+  return b;
+}
+function bitString(selector) {
+  let s = '';
+  document.querySelectorAll(selector).forEach(b => { s += b.classList.contains('on') ? '1' : '0'; });
+  return s;
+}
+function paintDays(str) {
+  const box = $('days');
+  box.textContent = '';
+  ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].forEach((name, i) => {
+    const b = toggleButton('day', !str || str.charAt(i) !== '0', name);
+    b.textContent = name;
+    box.appendChild(b);
+  });
+}
+function paintSlots(str) {
+  const box = $('slots');
+  box.textContent = '';
+  for (let row = 0; row < 2; row++) {
+    const labels = document.createElement('div');
+    labels.className = 'hours';
+    const grid = document.createElement('div');
+    grid.className = 'slots';
+    for (let hour = 0; hour < 12; hour++) {
+      const lab = document.createElement('span');
+      lab.textContent = String(row * 12 + hour).padStart(2, '0');
+      labels.appendChild(lab);
+      for (let half = 0; half < 2; half++) {
+        const i = (row * 12 + hour) * 2 + half;
+        const label = String(row * 12 + hour).padStart(2, '0') + (half ? ':30' : ':00');
+        grid.appendChild(toggleButton('slot', str && str.charAt(i) === '1', label));
+      }
+    }
+    box.appendChild(labels);
+    box.appendChild(grid);
+  }
+}
+async function refresh() {
+  try {
+    const s = JSON.parse(await req('/api/status'));
+    $('time').textContent = s.time || '';
+    $('tz').textContent = s.timezone || '';
+    $('fanBig').textContent = s.fan_on ? 'ON' : 'OFF';
+    $('fanBig').className = 'big ' + (s.fan_on ? 'on' : 'off');
+    $('fanSub').textContent = fanLine(s);
+    if (s.temp_c === null || s.temp_c === undefined) {
+      $('tempBig').textContent = '\u2014';
+      $('tempSub').textContent = s.sensor_error ? 'unavailable' : 'waiting\u2026';
+      $('humBig').textContent = '\u2014';
+      $('humSub').textContent = s.sensor_error ? 'unavailable' : 'waiting\u2026';
+    } else {
+      $('tempBig').textContent = s.temp_c.toFixed(1) + ' \u00b0C';
+      $('humBig').textContent = s.humidity.toFixed(1) + '%';
+      if (s.temp_avg === null || s.temp_avg === undefined) {
+        $('tempSub').textContent = s.sensor_ok ? 'air temperature' : 'stale reading';
+        $('humSub').textContent = s.sensor_ok ? 'relative humidity' : 'stale reading';
+      } else {
+        $('tempSub').textContent = diffText(s.temp_avg, s.temp_c, ' \u00b0C');
+        $('humSub').textContent = diffText(s.hum_avg, s.humidity, '%');
+      }
+    }
+    paintMeter('memBar', 'memLine', s.mem_used, s.mem_free);
+    paintMeter('storeBar', 'storeLine', s.storage_used, s.storage_free);
+    $('mistAgo').textContent = ago(s.last_mist);
+    $('feedAgo').textContent = ago(s.last_feed);
+    $('btn').setAttribute('aria-label', s.fan_on ? 'Stop fan' : 'Start for ' + s.manual_min + ' min');
+    $('btn').className = 'card fan-card' + (s.fan_on ? ' stop' : '');
+    $('btn').disabled = false;
+    if (!formLoaded) {
+      $('man').value = s.manual_min;
+      $('sint').value = s.sensor_interval_min;
+      $('lkeep').value = s.log_keep;
+      paintDays(s.weekdays || '');
+      paintSlots(s.segments || '');
+      formLoaded = true;
+    }
+    const lk = s.boot + ':' + s.log_rev;
+    if (lk !== logKey) {
+      const logs = await req('/api/logs');
+      $('log').textContent = logs.trim() ? logs.trim().split(NL).reverse().join(NL) : 'No log entries yet.';
+      logKey = lk;
+    }
+    const mk = s.boot + ':' + s.maint_rev;
+    if (mk !== maintKey) {
+      maintEvents = JSON.parse(await req('/api/maintenance')).events || [];
+      maintKey = mk;
+    }
+    renderMaint();
+  } catch (e) {
+    $('fanBig').textContent = '\u2014';
+    $('fanBig').className = 'big err';
+    $('fanSub').textContent = 'Device unreachable';
+    $('btn').disabled = true;
+  }
+}
+async function press() {
+  $('btn').disabled = true;
+  try { await post('/api/button'); } catch (e) {}
+  refresh();
+}
+function maintRow(ev) {
+  const names = {mist:'Mist', feed:'Feed', soil:'Soil', deco:'Deco', note:'Note'};
+  const row = document.createElement('div');
+  const kind = document.createElement('span');
+  kind.className = 'maint-kind';
+  kind.textContent = names[ev[1]] || ev[1];
+  row.appendChild(kind);
+  if (ev[1] === 'note' && ev[2]) row.appendChild(document.createTextNode(': ' + ev[2]));
+  const date = document.createElement('span');
+  date.className = 'maint-date';
+  date.textContent = clock(ev[0]);
+  row.appendChild(document.createTextNode(' \u00b7 ' + ago(ev[0]) + ' \u00b7 '));
+  row.appendChild(date);
+  return row;
+}
+function renderMaint() {
+  const list = $('maintList');
+  const pager = $('maintPager');
+  list.textContent = '';
+  const n = maintEvents.length;
+  if (!n) {
+    list.className = 'maint-list muted';
+    list.textContent = 'Nothing recorded yet.';
+    pager.style.display = 'none';
+    return;
+  }
+  const pages = Math.ceil(n / MAINT_PAGE);
+  if (maintPage >= pages) maintPage = pages - 1;
+  if (maintPage < 0) maintPage = 0;
+  list.className = 'maint-list';
+  maintEvents.slice(maintPage * MAINT_PAGE, maintPage * MAINT_PAGE + MAINT_PAGE).forEach(ev => {
+    list.appendChild(maintRow(ev));
+  });
+  pager.style.display = pages > 1 ? 'flex' : 'none';
+  $('maintPage').textContent = 'Page ' + (maintPage + 1) + ' of ' + pages;
+  $('maintPrev').disabled = maintPage <= 0;
+  $('maintNext').disabled = maintPage + 1 >= pages;
+}
+function maintStep(d) {
+  maintPage = Math.max(0, maintPage + d);
+  renderMaint();
+}
+async function addMaint(data, msgId) {
+  const msg = $(msgId);
+  msg.textContent = '';
+  msg.className = 'muted';
+  try {
+    maintEvents = JSON.parse(await post('/api/maintenance', data)).events || [];
+    maintPage = 0;
+    renderMaint();
+    refresh();
+    return true;
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.className = 'err';
+    return false;
+  }
+}
+function maint(kind) {
+  addMaint({kind: kind}, 'maintMsg');
+}
+async function addNote() {
+  if (await addMaint({kind: 'note', text: $('noteText').value}, 'noteMsg')) $('noteText').value = '';
+}
+async function submit(msgId, busy, done, url, data, after) {
+  const msg = $(msgId);
+  msg.textContent = busy; msg.className = 'muted';
+  try {
+    await post(url, data);
+    msg.textContent = done;
+    refresh();
+    if (after) after();
+  } catch (e) { msg.textContent = e.message; msg.className = 'err'; }
+}
+function saveSchedule() {
+  submit('schedMsg', 'Saving\u2026', 'Saved.', '/api/schedule', {
+    segments: bitString('#slots .slot'), weekdays: bitString('#days .day'), manual_min: +$('man').value});
+}
+function saveAdvanced() {
+  submit('advMsg', 'Saving\u2026', 'Saved.', '/api/settings', {
+    sensor_interval_min: +$('sint').value, log_keep: +$('lkeep').value}, loadHistory);
+}
+function purge(question, url, done, after) {
+  if (confirm(question)) submit('advMsg', 'Purging\u2026', done, url, {}, after);
+}
+function purgeHistory() {
+  purge('Delete all climate and fan history on the device? The chart will be empty.',
+    '/api/purge-history', 'Climate history purged.', loadHistory);
+}
+function purgeLog() {
+  purge('Delete all log lines on the device?', '/api/purge-log', 'Log purged.');
+}
+function purgeMaint() {
+  purge('Delete all maintenance history on the device?', '/api/purge-maintenance', 'Maintenance purged.');
+}
+const chartEl = $('chart');
+chartEl.addEventListener('pointermove', e => { if (e.pointerType === 'mouse' && !tipPinned) showTip(e, false); });
+chartEl.addEventListener('pointerdown', e => showTip(e, e.pointerType !== 'mouse'));
+chartEl.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !tipPinned) hideTip(); });
+addEventListener('pointerdown', e => {
+  if (tipPinned && e.target !== chartEl) hideTip();
+});
+refresh();
+loadHistory();
+setInterval(refresh, 3000);
+setInterval(loadHistory, 60000);
+addEventListener('resize', drawChart);
+</script>
+</body></html>

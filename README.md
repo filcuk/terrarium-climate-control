@@ -76,7 +76,7 @@ With the grille facing you and the pins pointing down, left to right is usually:
 4 GND   ---------- Board GND
 ```
 
-Use **3V3**, not the board 5V pin. Keep the sensor wires reasonably short (under about 1 m). The controller reads the sensor every 15 minutes by default (5 minutes is the shortest). A failed read is written to the log. Successful readings stay in the climate history.
+Use **3V3**, not the board 5V pin. Keep the sensor wires reasonably short (under about 1 m). The controller reads the sensor every 15 minutes by default (5 minutes is the shortest). After a failed read it tries again every 30 seconds; the first failure and the recovery are written to the log. Successful readings stay in the climate history.
 
 **Check the 2N2222's pinout before wiring.** Different makers order the C, B and E legs differently. For example, PN2222A is E-B-C and P2N2222A is C-B-E, read with the flat face toward you and legs pointing down. Look up the datasheet for the part number printed on yours.
 
@@ -88,10 +88,12 @@ If the fan stutters, or the board resets when the fan starts, the fan is drawing
 | File           | You create it? | What it is                                                                                                             |
 | -------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `main.py`      | yes            | The controller. Runs automatically on power-up.                                                                        |
+| `index.html`   | yes            | The web page, streamed from flash.                                                                                     |
+| `index.html.gz` | yes (optional) | Compressed copy of the page (about 9 KB instead of 30 KB). Served instead of `index.html` unless `index.html` is newer. |
 | `wifi.cfg`     | yes            | WiFi credentials. Copy `wifi.cfg.example`, fill it in, and save it on the board as `wifi.cfg`.                         |
 | `schedule.cfg` | no             | Created when you save the schedule from the web page. Delete it to go back to every day, 08:00–14:00.                   |
 | `settings.cfg` | no             | Sensor interval and log size, saved from Advanced on the web page.                                                     |
-| `events.log`   | no             | Rolling log (was `fan.log` in earlier versions; renamed automatically). How many lines are kept is set under Advanced (default 100, max 250). |
+| `events.log`   | no             | Rolling log. How many lines are kept is set under Advanced (default 100, max 250). |
 | `climate.hist` | no             | Temperature and humidity. The last day is kept as read; older samples are averaged (1 hour, then 4 hours, then 12 hours) and dropped after 30 days. |
 | `fan.hist`     | no             | Fan run start/end times for the last 7 days, drawn as hatched bands on the chart.                                      |
 | `maintenance.hist` | no         | Mist, feed, soil, decoration, and notes. Kept for 30 days, or the newest 100 if there are more. The page shows five at a time. |
@@ -113,7 +115,7 @@ timezone=Europe/London
 ## Flash / run
 
 1. Install [MicroPython for ESP32-C3](https://micropython.org/download/ESP32_GENERIC_C3/).
-2. Copy `main.py` and `wifi.cfg` to the board (Thonny, `mpremote`, etc.).
+2. Copy `main.py`, `index.html`, `index.html.gz`, and `wifi.cfg` to the board (Thonny, `mpremote`, etc.).
 3. Reset the board. Once it's on WiFi, the log shows a line like:
   `WiFi: connected. Device IP: 192.168.1.42  ->  http://192.168.1.42/`
 4. Open that address in a browser on the same network.
@@ -126,15 +128,25 @@ python preview.py
 
 That serves the page at `http://127.0.0.1:8080/` with sample readings.
 
+After editing `index.html`, rebuild the compressed copy:
+
+```bash
+python -m gzip --best index.html
+```
+
 ```bash
 mpremote connect auto cp main.py :main.py
+mpremote connect auto cp index.html :index.html
+mpremote connect auto cp index.html.gz :index.html.gz
 mpremote connect auto cp wifi.cfg :wifi.cfg
 mpremote connect auto reset
 ```
 
 If WiFi isn't configured or can't connect, the fan and button still work. The board keeps retrying WiFi in the background, waiting longer between attempts, up to every 10 minutes.
 
-The web page has no password. Anyone on your network can open it.
+The web page has no password. Anyone on your network can open it. Other websites you visit can't press its buttons: the board only accepts changes sent as JSON, which browsers won't send across sites without permission the board never gives.
+
+Errors inside the loop are logged and skipped; 20 in a row reset the board.
 
 **Safe mode:** hold the button while the board powers up or resets. The controller and WiFi don't start, so Thonny or mpremote can always connect.
 
@@ -143,7 +155,7 @@ The web page has no password. Anyone on your network can open it.
 
 | Event                              | Result                                                                 |
 | ---------------------------------- | ---------------------------------------------------------------------- |
-| Clock not synced yet               | Schedule stays off. The fan card says "Waiting for clock". On-demand still works. |
+| Clock not synced yet               | Schedule stays off. The fan card says "Waiting for clock". On-demand still works. The board retries every minute. |
 | Inside a selected half-hour on a selected day | Fan runs until that stretch ends, or at midnight if the next day is off |
 | Selected 23:30 and 00:00, both days on | One run from 23:30 to 00:30                                       |
 | A day left off                     | The fan stays off that day. The next run is the next selected day.    |

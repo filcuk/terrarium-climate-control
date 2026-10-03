@@ -17,10 +17,7 @@ DAY = 86400
 
 
 def page_html():
-    text = (ROOT / "main.py").read_text(encoding="utf-8")
-    start = text.index('PAGE = """') + len('PAGE = """')
-    end = text.index('"""', start)
-    return text[start:end]
+    return (ROOT / "index.html").read_text(encoding="utf-8")
 
 
 def _read_hist(name):
@@ -99,6 +96,8 @@ def fan_runs(now):
 POINTS = None
 FANS = None
 MAINT = None
+MAINT_REV = 0
+BOOT = int(time.time())
 
 
 def ensure_data():
@@ -175,6 +174,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, "text/plain", "Not found")
 
     def do_POST(self):
+        global MAINT_REV
         ensure_data()
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -198,10 +198,12 @@ class Handler(BaseHTTPRequestHandler):
                     return
             MAINT.insert(0, [int(time.time()), kind, note])
             del MAINT[100:]
+            MAINT_REV += 1
             self._send(200, "application/json", json.dumps({"events": MAINT}))
             return
         if path == "/api/purge-maintenance":
             MAINT[:] = []
+            MAINT_REV += 1
         self._send(200, "application/json", json.dumps(status_body()))
 
 
@@ -253,6 +255,9 @@ def status_body():
         "storage_free": 1400832,
         "last_mist": next((row[0] for row in MAINT if row[1] == "mist"), None),
         "last_feed": next((row[0] for row in MAINT if row[1] == "feed"), None),
+        "boot": BOOT,
+        "log_rev": 0,
+        "maint_rev": MAINT_REV,
     }
 
 
