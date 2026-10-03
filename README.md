@@ -150,6 +150,10 @@ Errors inside the loop are logged and skipped; 20 in a row reset the board.
 
 **Safe mode:** hold the button while the board powers up or resets. The controller and WiFi don't start, so Thonny or mpremote can always connect.
 
+**Memory limit:** the board compiles `main.py` before any of it runs, and that compile needs one large free block. The WiFi driver needs the same kind of block. If `main.py` grows past that, boot logs `WiFi: could not start (WiFi Out of Memory)` even though the controller itself still starts. The file is already close to this limit.
+
+Explanations in `main.py` are `#` comments. A docstring is kept in memory for the whole compile and then thrown away, so it spends the memory WiFi needs. A comment is dropped before the compile and costs nothing. Keep new text as comments, and keep new code small. If a change brings the WiFi error back, compile `main.py` to `main.mpy` on a PC with the same MicroPython version (`mpy-cross`) and copy the `.mpy` file instead. The board loads that directly and skips the compile.
+
 ## Behaviour summary
 
 
