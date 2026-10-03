@@ -58,8 +58,13 @@ N_SLOTS = 48
 MEM_LOG_MS = 60 * MINUTE
 MAINT_KEEP_S = 30 * DAY_S
 MAINT_MAX = 100
-MAINT_KINDS = ("mist", "feed", "soil", "deco", "note")
+# Maintenance buttons. Note is always available and is not part of this list.
+DEFAULT_CATEGORIES = ("Mist", "Feed", "Soil", "Deco")
+MAX_CATEGORIES = 8
+MAX_CATEGORY_LEN = 24
 NOTE_MAX = 120
+# Rows written before categories were names, shown as the default labels.
+LEGACY_KINDS = {"mist": "Mist", "feed": "Feed", "soil": "Soil", "deco": "Deco"}
 
 DEBOUNCE_MS = 50  # button must be held this long to count
 # After the fan turns ON, ignore the button briefly. Fan motors inject noise into
@@ -94,13 +99,15 @@ SEND_CHUNK = 1024
 manual_ms = DEFAULT_MANUAL_MIN * MINUTE
 sensor_interval_ms = DEFAULT_SENSOR_INTERVAL_MIN * MINUTE
 log_keep = DEFAULT_LOG_KEEP
+maint_categories = list(DEFAULT_CATEGORIES)
+settings_timezone = ""  # empty: wifi.cfg timezone is used
+settings_tz_rejected = ""
 
 manual_start = 0
 manual_running = False
 suppressed_until = 0  # device UTC seconds; schedule stays off until then
 btn_blank_start = None
 fan_was_active = False
-sched_was_running = False
 # 48 half-hours from local midnight. 1 = fan scheduled on. Default 08:00-14:00.
 segments = [0] * N_SLOTS
 for _i in range(16, 28):
@@ -149,6 +156,8 @@ humidity = None
 sensor_ok = False
 sensor_error = None
 sensor_due_at = None
+sensor_at = None  # device UTC seconds of the last good reading
+sensor_read_ticks = None  # ticks of the last measure, so a second read can wait 2 s
 
 # Climate history: (device UTC seconds, temp tenths, humidity tenths, span seconds,
 # readings averaged). span 0 = raw reading. Tenths keep these small ints, not floats.
@@ -409,6 +418,60 @@ def apply_zone(cfg):
   log("Timezone: %s." % tz_name)
 
 
+def apply_settings_zone(name):
+  # A timezone saved from Advanced wins over wifi.cfg. No log when it is unchanged.
+  global tz_name, tz_fixed, settings_timezone
+  if name not in ZONES:
+    raise ValueError("Unknown timezone.")
+  settings_timezone = name
+  if not tz_fixed and tz_name == name:
+    refresh_tz(True)
+    return
+  tz_name = name
+  tz_fixed = False
+  refresh_tz(True)
+  log("Timezone: %s." % tz_name)
+
+
+def parse_categories(text):
+  # Comma-separated button names. "Note" is reserved and dropped. First spelling wins.
+  names = []
+  seen = []
+  for part in str(text).split(","):
+    name = " ".join(part.split())
+    if not name or name.lower() == "note":
+      continue
+    if len(name) > MAX_CATEGORY_LEN:
+      name = name[:MAX_CATEGORY_LEN].rstrip()
+    if not name:
+      continue
+    key = name.lower()
+    if key in seen:
+      continue
+    seen.append(key)
+    names.append(name)
+    if len(names) >= MAX_CATEGORIES:
+      break
+  return names
+
+
+def canonical_kind(kind):
+  kind = " ".join(str(kind).split())
+  if kind.lower() == "note":
+    return "note"
+  return LEGACY_KINDS.get(kind, kind)
+
+
+def match_category(kind):
+  kind = canonical_kind(kind)
+  if kind == "note":
+    return "note"
+  for name in maint_categories:
+    if name.lower() == kind.lower():
+      return name
+  return None
+
+
 # ---------------------------------------------------------------- logging
 
 def rewrite_log_file():
@@ -454,27 +517,42 @@ def purge_log():
 # ---------------------------------------------------------------- settings
 
 def load_settings():
-  global sensor_interval_ms, log_keep
+  global sensor_interval_ms, log_keep, maint_categories, settings_timezone, settings_tz_rejected
   cfg = read_cfg(SETTINGS_CFG)
   # sensor_interval_s from older builds is ignored so a saved 10 seconds becomes 15 minutes
   interval = cfg_int(cfg, "sensor_interval_min", MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN,
                      DEFAULT_SENSOR_INTERVAL_MIN)
   sensor_interval_ms = interval * MINUTE
   log_keep = cfg_int(cfg, "log_keep", MIN_LOG_KEEP, MAX_LOG_KEEP, DEFAULT_LOG_KEEP)
+  if "maint_categories" in cfg:
+    maint_categories = parse_categories(cfg["maint_categories"])
+  else:
+    maint_categories = list(DEFAULT_CATEGORIES)
+  name = cfg.get("timezone", "").strip()
+  settings_tz_rejected = name if name and name not in ZONES else ""
+  settings_timezone = "" if settings_tz_rejected else name
 
 
-def save_settings(interval, keep):
-  global sensor_interval_ms, log_keep, sensor_due_at
+def save_settings(interval, keep, zone, categories):
+  global sensor_interval_ms, log_keep, sensor_due_at, maint_categories
   check_range(interval, MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN, "Sensor interval (minutes)")
   check_range(keep, MIN_LOG_KEEP, MAX_LOG_KEEP, "Log lines kept")
+  zone = str(zone).strip()
+  if zone not in ZONES:
+    raise ValueError("Unknown timezone.")
+  names = parse_categories(categories)
   with open(SETTINGS_CFG, "w") as f:
-    f.write("sensor_interval_min=%d\nlog_keep=%d\n" % (interval, keep))
+    f.write("sensor_interval_min=%d\nlog_keep=%d\ntimezone=%s\nmaint_categories=%s\n" % (
+      interval, keep, zone, ", ".join(names)))
   sensor_interval_ms = interval * MINUTE
   sensor_due_at = None  # read now; the next one follows the new interval
   log_keep = keep
   trim_log_memory()
   rewrite_log_file()
-  log("Settings changed: sensor every %d min, keep %d log lines." % (interval, keep))
+  maint_categories = names
+  apply_settings_zone(zone)
+  log("Settings changed: sensor every %d min, keep %d log lines, %d maintenance categories." % (
+    interval, keep, len(names)))
 
 
 # ---------------------------------------------------------------- schedule
@@ -634,21 +712,20 @@ def schedule_state():
   return True, True, stretch_remaining_s(idx, sec_into, weekday)
 
 
-def toggle_fan(now, source):
+def toggle_fan(now):
   # Same action as the physical button: stop if running, otherwise start an on-demand run.
+  # Fan on/off is recorded in fan.hist, so it is not written to the log.
   global manual_running, manual_start, suppressed_until, btn_blank_start
   sched_running, _, sched_left = schedule_state()
   if sched_running or manual_running:
     manual_running = False
     if sched_running:
       suppressed_until = utime.time() + sched_left
-    log("%s: fan STOPPED by user." % source)
   else:
     manual_running = True
     manual_start = now
     # Ignore button while the fan spins up (noise looks like another press)
     btn_blank_start = now
-    log("%s: on-demand %s run STARTED." % (source, fmt_duration(manual_ms)))
 
 
 def climate_averages():
@@ -661,13 +738,6 @@ def climate_averages():
   if w <= 0:
     return None, None
   return st / w / 10, sh / w / 10
-
-
-def last_maint(kind):
-  for ts, k, _text in reversed(maintenance):
-    if k == kind:
-      return ts + EPOCH_OFFSET_S
-  return None
 
 
 def storage_usage():
@@ -718,7 +788,9 @@ def status(now):
     "hum_avg": hum_avg,
     "sensor_ok": sensor_ok,
     "sensor_error": sensor_error,
+    "sensor_at": None if sensor_at is None else sensor_at + EPOCH_OFFSET_S,
     "sensor_interval_min": sensor_interval_ms // MINUTE,
+    "categories": maint_categories,
     "log_keep": log_keep,
     "log_count": len(log_lines),
     "history_points": len(history),
@@ -731,8 +803,6 @@ def status(now):
     "mem_free": gc.mem_free(),
     "storage_used": store_used,
     "storage_free": store_free,
-    "last_mist": last_maint("mist"),
-    "last_feed": last_maint("feed"),
     "boot": BOOT_ID,
     "log_rev": log_rev,
     "maint_rev": maint_rev,
@@ -933,6 +1003,24 @@ def purge_history():
   log("Climate history purged.")
 
 
+def purge_all():
+  # One status line. Purging the log last would erase the other two messages.
+  global history_stored_at, fan_run_start, maint_rev
+  history[:] = []
+  fan_runs[:] = []
+  history_stored_at = 0
+  if fan_run_start is not None:
+    fan_run_start = utime.time()
+  maintenance[:] = []
+  maint_rev += 1
+  log_lines[:] = []
+  rewrite_history_file()
+  rewrite_fan_runs_file()
+  rewrite_maintenance_file()
+  rewrite_log_file()
+  log("All stored history purged.")
+
+
 # ---------------------------------------------------------------- maintenance
 
 def rewrite_maintenance_file():
@@ -945,13 +1033,16 @@ def load_maintenance():
   maintenance[:] = []
   for line in read_lines(MAINT_FILE):
     parts = line.split(",")
-    if len(parts) < 2 or parts[1] not in MAINT_KINDS:
+    if len(parts) < 2:
+      continue
+    kind = canonical_kind(parts[1])
+    if not kind:
       continue
     text = ""
-    if parts[1] == "note":
+    if kind == "note":
       text = " ".join(",".join(parts[2:]).split())[:NOTE_MAX]
     try:
-      maintenance.append((int(parts[0]), parts[1], text))
+      maintenance.append((int(parts[0]), kind, text))
     except ValueError:
       continue
     if len(maintenance) > MAINT_MAX:
@@ -963,22 +1054,22 @@ def load_maintenance():
 
 def record_maintenance(kind, text=""):
   global maint_rev
-  if kind not in MAINT_KINDS:
+  stored = match_category(kind)
+  if stored is None:
     raise ValueError("Unknown maintenance kind.")
   if not time_synced:
     raise ValueError("Clock not synced.")
   note = ""
-  if kind == "note":
+  if stored == "note":
     note = " ".join(str(text).split())
     if not note:
       raise ValueError("Note is empty.")
     note = note[:NOTE_MAX]
   now_ts = utime.time()
-  maintenance.append((now_ts, kind, note))
+  maintenance.append((now_ts, stored, note))
   trim_rows(maintenance, 0, now_ts - MAINT_KEEP_S, MAINT_MAX)
   rewrite_maintenance_file()
   maint_rev += 1
-  log("Maintenance: %s." % kind)
 
 
 def maintenance_json():
@@ -1009,14 +1100,10 @@ def sensor_start():
     log("Sensor: could not init: %s" % e)
 
 
-def sensor_poll(now):
-  # Read the AM2302 every sensor_interval_ms, retrying sooner after a failure.
-  # Only the first failure in a row and the recovery are logged.
-  global temp_c, humidity, sensor_ok, sensor_error, sensor_due_at
-  if dht is None:
-    return
-  if sensor_due_at is not None and utime.ticks_diff(now, sensor_due_at) < 0:
-    return
+def sensor_measure(now):
+  # One AM2302 read. Failures log once until the next success.
+  global temp_c, humidity, sensor_ok, sensor_error, sensor_due_at, sensor_at, sensor_read_ticks
+  sensor_read_ticks = now
   try:
     dht.measure()
     t = dht.temperature()
@@ -1035,7 +1122,27 @@ def sensor_poll(now):
   humidity = h
   sensor_ok = True
   sensor_error = None
+  if time_synced:
+    sensor_at = utime.time()
   store_history_sample(t, h)
+
+
+def sensor_poll(now):
+  # Read the AM2302 every sensor_interval_ms, retrying sooner after a failure.
+  if dht is None:
+    return
+  if sensor_due_at is not None and utime.ticks_diff(now, sensor_due_at) < 0:
+    return
+  sensor_measure(now)
+
+
+def sensor_read_now(now):
+  # Page request. Inside the 2 s gap the current values are already the answer.
+  if dht is None:
+    raise ValueError("Sensor unavailable.")
+  if sensor_read_ticks is not None and utime.ticks_diff(now, sensor_read_ticks) < 2 * SECOND:
+    return
+  sensor_measure(now)
 
 
 # ---------------------------------------------------------------- button
@@ -1094,10 +1201,12 @@ def log_memory():
 def wifi_start(now):
   global wlan, wifi_cfg, hostname
   wifi_cfg = read_cfg(WIFI_CFG)
+  apply_zone(wifi_cfg)
+  if settings_timezone:
+    apply_settings_zone(settings_timezone)
   if not wifi_cfg.get("ssid"):
     log("WiFi: no %s with ssid=... found, web interface disabled." % WIFI_CFG)
     return
-  apply_zone(wifi_cfg)
   # Hostname must be set before the interface comes up; the ESP32 port's mDNS
   # responder then answers for <hostname>.local
   name = wifi_cfg.get("hostname", DEFAULT_HOSTNAME)
@@ -1141,7 +1250,11 @@ def sync_time(now):
 
 def clock_poll(now):
   # Retry every minute until the clock is set, then re-sync daily against drift.
-  if not wifi_connected or ntptime is None or ntp_at is None:
+  # A connected board with no attempt yet syncs immediately.
+  if not wifi_connected or ntptime is None:
+    return
+  if ntp_at is None:
+    sync_time(now)
     return
   wait = NTP_RESYNC_MS if time_synced else NTP_RETRY_MS
   if utime.ticks_diff(now, ntp_at) >= wait:
@@ -1238,6 +1351,76 @@ def send_page(conn):
       conn.sendall(view[:n])
 
 
+def stream_file(conn, path):
+  view = memoryview(send_buf)
+  with open(path, "rb") as f:
+    while True:
+      n = f.readinto(send_buf)
+      if not n:
+        break
+      conn.sendall(view[:n])
+
+
+def download_filename(name):
+  # Stamp before the extension so a new download does not replace the last one.
+  stamp = timestamp().replace(" ", "-").replace(":", "")
+  dot = name.rfind(".")
+  if dot < 0:
+    return "%s-%s" % (name, stamp)
+  return "%s-%s%s" % (name[:dot], stamp, name[dot:])
+
+
+def attachment_header(filename):
+  return "Content-Disposition: attachment; filename=\"%s\"\r\n" % filename
+
+
+def send_attachment(conn, path, filename):
+  info = file_size_mtime(path)
+  size = info[0] if info else 0
+  send_head(conn, "200 OK", "text/plain; charset=utf-8", size, attachment_header(filename))
+  if info:
+    stream_file(conn, path)
+
+
+def send_sections(conn, filename, sections):
+  # Each section is a header line, the file (if it exists), and a trailing newline.
+  prepared = []
+  total = 0
+  for title, path in sections:
+    head = ("# %s\n" % title).encode()
+    info = file_size_mtime(path)
+    size = info[0] if info else 0
+    prepared.append((head, path if info else None))
+    total += len(head) + size + 1
+  send_head(conn, "200 OK", "text/plain; charset=utf-8", total, attachment_header(filename))
+  for head, path in prepared:
+    conn.sendall(head)
+    if path:
+      stream_file(conn, path)
+    conn.sendall(b"\n")
+
+
+def send_download(conn, which):
+  if which == "log":
+    send_attachment(conn, LOG_FILE, download_filename("events.log"))
+  elif which == "maintenance":
+    send_attachment(conn, MAINT_FILE, download_filename("maintenance.hist"))
+  elif which == "history":
+    send_sections(conn, download_filename("climate.txt"), (
+      (HISTORY_FILE, HISTORY_FILE),
+      (FAN_HISTORY_FILE, FAN_HISTORY_FILE),
+    ))
+  elif which == "all":
+    send_sections(conn, download_filename("terrarium.txt"), (
+      (LOG_FILE, LOG_FILE),
+      (HISTORY_FILE, HISTORY_FILE),
+      (FAN_HISTORY_FILE, FAN_HISTORY_FILE),
+      (MAINT_FILE, MAINT_FILE),
+    ))
+  else:
+    send(conn, "404 Not Found", "text/plain", "Not found")
+
+
 def read_request(conn):
   # Return (method, path, query, body, content type).
   data = b""
@@ -1288,7 +1471,7 @@ def query_int(qs, key, default):
 
 
 def api_button(data, now):
-  toggle_fan(now, "Web")
+  toggle_fan(now)
 
 
 def api_schedule(data, now):
@@ -1296,7 +1479,12 @@ def api_schedule(data, now):
 
 
 def api_settings(data, now):
-  save_settings(int(data["sensor_interval_min"]), int(data["log_keep"]))
+  save_settings(int(data["sensor_interval_min"]), int(data["log_keep"]),
+                str(data["timezone"]), str(data.get("maint_categories", "")))
+
+
+def api_sensor(data, now):
+  sensor_read_now(now)
 
 
 def api_maintenance(data, now):
@@ -1311,9 +1499,11 @@ POST_ROUTES = {
   "/api/schedule": api_schedule,
   "/api/settings": api_settings,
   "/api/maintenance": api_maintenance,
+  "/api/sensor": api_sensor,
   "/api/purge-log": lambda data, now: purge_log(),
   "/api/purge-history": lambda data, now: purge_history(),
   "/api/purge-maintenance": lambda data, now: purge_maintenance(),
+  "/api/purge-all": lambda data, now: purge_all(),
 }
 
 
@@ -1330,6 +1520,13 @@ def handle(conn, method, path, qs, body, ctype, now):
       send_json(conn, history_json(query_int(qs, "days", 7), page))
     elif path == "/api/maintenance":
       send_json(conn, maintenance_json())
+    elif path == "/api/download":
+      which = ""
+      for part in qs.split("&"):
+        if part.startswith("which="):
+          which = part.split("=", 1)[1]
+          break
+      send_download(conn, which)
     else:
       send(conn, "404 Not Found", "text/plain", "Not found")
     return
@@ -1390,6 +1587,8 @@ if btn_pin.value() == 0:
 load_settings()
 load_log()
 load_schedule()
+if settings_tz_rejected:
+  log("Settings timezone '%s' is not built in; keeping the wifi.cfg timezone." % settings_tz_rejected)
 
 _cause = machine.reset_cause()
 log("Terrarium Climate Controller starting (ESP32-C3), reset cause: %s" % RESET_CAUSE_NAMES.get(_cause, _cause))
@@ -1417,7 +1616,7 @@ log("Controller ready.")
 # ---------------------------------------------------------------- main loop
 
 def control_step(now):
-  global manual_running, btn_blank_start, sched_was_running, fan_was_active, mem_logged_at
+  global manual_running, btn_blank_start, fan_was_active, mem_logged_at
 
   refresh_tz()
   wifi_poll(now)
@@ -1427,30 +1626,22 @@ def control_step(now):
     log_memory()
     mem_logged_at = now
 
-  # 1. Check Manual Run Expiration
+  # 1. Check Manual Run Expiration. The run itself is stored in fan.hist.
   if manual_running and utime.ticks_diff(now, manual_start) >= manual_ms:
     manual_running = False
-    log("On-demand %s run completed." % fmt_duration(manual_ms))
 
   # 2. Handle Button Press (debounced in the interrupt, EMI-blanked here)
   blanked = btn_blank_start is not None and utime.ticks_diff(now, btn_blank_start) < EMI_BLANK_MS
   if not blanked:
     btn_blank_start = None
   if button_pressed() and not blanked:
-    toggle_fan(now, "Button")
+    toggle_fan(now)
 
   # 3. Handle one web request, if any
   web_poll(now)
 
-  # 4. Schedule state + logging of scheduled starts/ends
-  sched_running, in_slot, _ = schedule_state()
-  if sched_running and not sched_was_running:
-    log("Scheduled run started.")
-  elif sched_was_running and not sched_running and not in_slot:
-    log("Scheduled run finished.")
-  sched_was_running = sched_running
-
-  # 5. Drive Fan Output. Schedule wins, so an on-demand run splits when a slot starts.
+  # 4. Drive Fan Output. Schedule wins, so an on-demand run splits when a slot starts.
+  sched_running, _, _ = schedule_state()
   fan_active = sched_running or manual_running
   if fan_active and not fan_was_active:
     # Also blank when a scheduled run starts the fan for the same reason

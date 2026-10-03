@@ -1,10 +1,10 @@
-# Terrarium Climate Controller (ESP32-C3)
+# Terrarium Climate Control
 
 MicroPython controller that runs a fan on a schedule, with a push button and a small web page for starting and stopping it.
 
 - **Schedule:** the fan runs during the half-hours you select, on the days you select, in local time. By default that is every day, 08:00–14:00. Summer time follows the timezone in `wifi.cfg`.
 - **Button:** if the fan is on, it stops, and that scheduled stretch stays off until it would have ended. If the fan is off, it starts an on-demand run (5 minutes by default).
-- **Web page:** shows temperature, humidity, fan status, the schedule, mist and feed times, a climate chart, and the log.
+- **Web page:** shows temperature, humidity, fan status, the schedule, maintenance, a climate chart, and the log. On a narrow screen the title, chart, and log are hidden.
 - **Sensor:** 4-pin ASAIR AM2302 for air temperature and relative humidity.
 
 
@@ -87,16 +87,17 @@ If the fan stutters, or the board resets when the fan starts, the fan is drawing
 
 | File           | You create it? | What it is                                                                                                             |
 | -------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `main.py`      | yes            | The controller. Runs automatically on power-up.                                                                        |
+| `main.py`      | yes            | Launcher on the board (`import terrarium`). In this repo it is the controller source; `python build.py` turns it into the two files below. |
+| `terrarium.mpy` | yes           | Compiled controller, written to `dist/` by `python build.py`. Copy this to the board next to the launcher. |
 | `index.html`   | yes            | The web page, streamed from flash.                                                                                     |
-| `index.html.gz` | yes (optional) | Compressed copy of the page (about 9 KB instead of 30 KB). Served instead of `index.html` unless `index.html` is newer. |
+| `index.html.gz` | yes           | Compressed copy of the page. `build.py` refreshes it. Served instead of `index.html` unless `index.html` is newer. |
 | `wifi.cfg`     | yes            | WiFi credentials. Copy `wifi.cfg.example`, fill it in, and save it on the board as `wifi.cfg`.                         |
 | `schedule.cfg` | no             | Created when you save the schedule from the web page. Delete it to go back to every day, 08:00–14:00.                   |
-| `settings.cfg` | no             | Sensor interval and log size, saved from Advanced on the web page.                                                     |
-| `events.log`   | no             | Rolling log. How many lines are kept is set under Advanced (default 100, max 250). |
+| `settings.cfg` | no             | Sensor interval, log size, timezone, and maintenance categories, saved from Advanced on the web page.                  |
+| `events.log`   | no             | Rolling log of system status, warnings, and errors. Fan runs and maintenance are kept in their own files, not here. How many lines are kept is set under Advanced (default 100, max 250). |
 | `climate.hist` | no             | Temperature and humidity. The last day is kept as read; older samples are averaged (1 hour, then 4 hours, then 12 hours) and dropped after 30 days. |
 | `fan.hist`     | no             | Fan run start/end times for the last 7 days, drawn as hatched bands on the chart.                                      |
-| `maintenance.hist` | no         | Mist, feed, soil, decoration, and notes. Kept for 30 days, or the newest 100 if there are more. The page shows five at a time. |
+| `maintenance.hist` | no         | Mist, feed, soil, decoration, and notes by default. The button names are a comma-separated list under Advanced. Note is always available. Kept for 30 days, or the newest 100 if there are more. The page shows five at a time. |
 
 
 `wifi.cfg`:
@@ -110,15 +111,21 @@ timezone=Europe/London
 
 `hostname` is optional and defaults to `terrarium`. It makes the page available at `http://terrarium1.local/` as well as at the IP address. Use letters, digits and hyphens only, and give each board a different name. `.local` addresses work on Windows 10 and later, macOS, iOS and most Linux systems. Some Android phones don't support them; use the IP address there.
 
-`timezone` sets local time for the schedule, the log, and the chart. Summer time is applied for the built-in zones: `UTC`, `Europe/London`, `Europe/Paris`, `America/New_York`, `America/Chicago`, `America/Denver`, and `America/Los_Angeles`. The default is `Europe/London`. An older file that only has `utc_offset_hours` keeps that fixed offset and does not follow summer time.
+`timezone` sets local time for the schedule, the log, and the chart. Summer time is applied for the built-in zones: `UTC`, `Europe/London`, `Europe/Paris`, `America/New_York`, `America/Chicago`, `America/Denver`, and `America/Los_Angeles`. The default is `Europe/London`. An older file that only has `utc_offset_hours` keeps that fixed offset and does not follow summer time. Saving Advanced stores the timezone in `settings.cfg`, and that choice wins over `wifi.cfg`.
 
 ## Flash / run
 
 1. Install [MicroPython for ESP32-C3](https://micropython.org/download/ESP32_GENERIC_C3/).
-2. Copy `main.py`, `index.html`, `index.html.gz`, and `wifi.cfg` to the board (Thonny, `mpremote`, etc.).
-3. Reset the board. Once it's on WiFi, the log shows a line like:
+2. Install `mpy-cross` for that same MicroPython version (`pip install mpy-cross`), then build:
+
+```bash
+python build.py
+```
+
+3. Copy `dist/main.py`, `dist/terrarium.mpy`, `dist/index.html`, `dist/index.html.gz`, and `wifi.cfg` to the board (Thonny, `mpremote`, etc.). The board's `main.py` is only `import terrarium`. The controller itself is `terrarium.mpy`, so the board does not compile it.
+4. Reset the board. Once it's on WiFi, the log shows a line like:
   `WiFi: connected. Device IP: 192.168.1.42  ->  http://192.168.1.42/`
-4. Open that address in a browser on the same network.
+5. Open that address in a browser on the same network.
 
 To look at the page on this computer, without the board:
 
@@ -128,19 +135,16 @@ python preview.py
 
 That serves the page at `http://127.0.0.1:8080/` with sample readings.
 
-After editing `index.html`, rebuild the compressed copy:
-
 ```bash
-python -m gzip --best index.html
-```
-
-```bash
-mpremote connect auto cp main.py :main.py
-mpremote connect auto cp index.html :index.html
-mpremote connect auto cp index.html.gz :index.html.gz
+mpremote connect auto cp dist/main.py :main.py
+mpremote connect auto cp dist/terrarium.mpy :terrarium.mpy
+mpremote connect auto cp dist/index.html :index.html
+mpremote connect auto cp dist/index.html.gz :index.html.gz
 mpremote connect auto cp wifi.cfg :wifi.cfg
 mpremote connect auto reset
 ```
+
+If an older `main.py` (the full controller) is still on the board, delete it before copying `dist/main.py`, or the copy replaces it. Leave `terrarium.mpy` next to that launcher. If `terrarium.mpy` was built with a different MicroPython version, the board raises `incompatible .mpy file`; install the matching `mpy-cross` and run `python build.py` again.
 
 If WiFi isn't configured or can't connect, the fan and button still work. The board keeps retrying WiFi in the background, waiting longer between attempts, up to every 10 minutes.
 
@@ -150,9 +154,9 @@ Errors inside the loop are logged and skipped; 20 in a row reset the board.
 
 **Safe mode:** hold the button while the board powers up or resets. The controller and WiFi don't start, so Thonny or mpremote can always connect.
 
-**Memory limit:** the board compiles `main.py` before any of it runs, and that compile needs one large free block. The WiFi driver needs the same kind of block. If `main.py` grows past that, boot logs `WiFi: could not start (WiFi Out of Memory)` even though the controller itself still starts. The file is already close to this limit.
+**Memory limit:** the board compiles `main.py` before any of it runs, and that compile needs one large free block. The WiFi driver needs the same kind of block. `python build.py` compiles the controller to `terrarium.mpy` on the PC and leaves the board a one-line `main.py`, so that compile happens on the PC instead.
 
-Explanations in `main.py` are `#` comments. A docstring is kept in memory for the whole compile and then thrown away, so it spends the memory WiFi needs. A comment is dropped before the compile and costs nothing. Keep new text as comments, and keep new code small. If a change brings the WiFi error back, compile `main.py` to `main.mpy` on a PC with the same MicroPython version (`mpy-cross`) and copy the `.mpy` file instead. The board loads that directly and skips the compile.
+Explanations in `main.py` are `#` comments. A docstring is kept in memory for the whole compile and then thrown away, so it spends the memory WiFi needs. A comment is dropped before the compile and costs nothing. Keep new text as comments.
 
 ## Behaviour summary
 

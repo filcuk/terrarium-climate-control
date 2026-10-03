@@ -98,6 +98,9 @@ FANS = None
 MAINT = None
 MAINT_REV = 0
 BOOT = int(time.time())
+CATEGORIES = ["Mist", "Feed", "Soil", "Deco"]
+SENSOR_AT = None
+PREVIEW_TZ = None
 
 
 def ensure_data():
@@ -107,13 +110,13 @@ def ensure_data():
         POINTS = climate_points(now)
         FANS = fan_runs(now)
         MAINT = [
-            [now - 2 * 3600, "mist", ""],
-            [now - 26 * 3600, "feed", ""],
+            [now - 2 * 3600, "Mist", ""],
+            [now - 26 * 3600, "Feed", ""],
             [now - 3 * DAY, "note", "Rinsed the water dish"],
-            [now - 6 * DAY, "soil", ""],
-            [now - 8 * DAY, "mist", ""],
-            [now - 12 * DAY, "deco", ""],
-            [now - 20 * DAY, "feed", ""],
+            [now - 6 * DAY, "Soil", ""],
+            [now - 8 * DAY, "Mist", ""],
+            [now - 12 * DAY, "Deco", ""],
+            [now - 20 * DAY, "Feed", ""],
         ]
 
 
@@ -129,17 +132,62 @@ def averages():
     return wt / w, wh / w
 
 
+def parse_categories(text):
+    names = []
+    seen = []
+    for part in str(text).split(","):
+        name = " ".join(part.split())
+        if not name or name.lower() == "note":
+            continue
+        if len(name) > 24:
+            name = name[:24].rstrip()
+        if not name or name.lower() in seen:
+            continue
+        seen.append(name.lower())
+        names.append(name)
+        if len(names) >= 8:
+            break
+    return names
+
+
+def download_filename(name):
+    stamp = time.strftime("%Y-%m-%d-%H%M%S")
+    dot = name.rfind(".")
+    if dot < 0:
+        return "%s-%s" % (name, stamp)
+    return "%s-%s%s" % (name[:dot], stamp, name[dot:])
+
+
+def download_body(which):
+    log = log_text() + "\n"
+    climate = "".join("%d,%.1f,%.1f\n" % (p[0], p[1], p[2]) for p in POINTS)
+    fan = "".join("%d,%d,%d\n" % (r[0], r[1], r[2]) for r in FANS)
+    maint = "".join("%d,%s%s\n" % (row[0], row[1], ("," + row[2]) if row[2] else "") for row in MAINT)
+    if which == "log":
+        return log, download_filename("events.log")
+    if which == "maintenance":
+        return maint, download_filename("maintenance.hist")
+    if which == "history":
+        return "# climate.hist\n" + climate + "# fan.hist\n" + fan, download_filename("climate.txt")
+    if which == "all":
+        body = "# events.log\n" + log + "# climate.hist\n" + climate + "# fan.hist\n" + fan + "# maintenance.hist\n" + maint
+        return body, download_filename("terrarium.txt")
+    return None, None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[%s] %s" % (self.log_date_time_string(), fmt % args))
 
-    def _send(self, code, content_type, body):
+    def _send(self, code, content_type, body, headers=None):
         if isinstance(body, str):
             body = body.encode()
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -171,23 +219,42 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/maintenance":
             self._send(200, "application/json", json.dumps({"events": MAINT}))
             return
+        if path == "/api/download":
+            which = self._qs().get("which", "")
+            body, filename = download_body(which)
+            if body is None:
+                self._send(404, "text/plain", "Not found")
+                return
+            self._send(200, "text/plain; charset=utf-8", body, {
+                "Content-Disposition": 'attachment; filename="%s"' % filename,
+            })
+            return
         self._send(404, "text/plain", "Not found")
 
     def do_POST(self):
-        global MAINT_REV
+        global MAINT_REV, CATEGORIES, PREVIEW_TZ, SENSOR_AT, POINTS
         ensure_data()
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0") or 0)
         raw = self.rfile.read(min(length, 4096)) if length else b""
-        if path == "/api/maintenance":
+        data = {}
+        if raw:
             try:
                 data = json.loads(raw.decode() or "{}")
-                kind = data.get("kind")
-                text = data.get("text") or ""
             except json.JSONDecodeError:
+                data = None
+        if path == "/api/maintenance":
+            if data is None:
                 self._send(400, "text/plain", "Invalid maintenance.")
                 return
-            if kind not in ("mist", "feed", "soil", "deco", "note"):
+            kind = data.get("kind")
+            text = data.get("text") or ""
+            allowed = [name.lower() for name in CATEGORIES]
+            if str(kind).lower() == "note":
+                kind = "note"
+            elif str(kind).lower() in allowed:
+                kind = CATEGORIES[allowed.index(str(kind).lower())]
+            else:
                 self._send(400, "text/plain", "Unknown maintenance kind.")
                 return
             note = ""
@@ -201,9 +268,33 @@ class Handler(BaseHTTPRequestHandler):
             MAINT_REV += 1
             self._send(200, "application/json", json.dumps({"events": MAINT}))
             return
+        if path == "/api/settings":
+            if data is None:
+                self._send(400, "text/plain", "Invalid settings.")
+                return
+            zone = str(data.get("timezone") or "").strip()
+            zones = ("UTC", "Europe/London", "Europe/Paris", "America/New_York",
+                     "America/Chicago", "America/Denver", "America/Los_Angeles")
+            if zone not in zones:
+                self._send(400, "text/plain", "Unknown timezone.")
+                return
+            PREVIEW_TZ = zone
+            CATEGORIES = parse_categories(str(data.get("maint_categories") or ""))
+            self._send(200, "application/json", json.dumps(status_body()))
+            return
+        if path == "/api/sensor":
+            SENSOR_AT = int(time.time())
+            self._send(200, "application/json", json.dumps(status_body()))
+            return
         if path == "/api/purge-maintenance":
             MAINT[:] = []
             MAINT_REV += 1
+        elif path == "/api/purge-history":
+            POINTS = []
+        elif path == "/api/purge-all":
+            MAINT[:] = []
+            MAINT_REV += 1
+            POINTS = []
         self._send(200, "application/json", json.dumps(status_body()))
 
 
@@ -225,7 +316,10 @@ def preview_timezone():
 
 
 def status_body():
+    global SENSOR_AT
     now = int(time.time())
+    if SENSOR_AT is None:
+        SENSOR_AT = now - 8 * 60
     last = POINTS[-1] if POINTS else (now, 23.0, 55.0, 0)
     temp_avg, hum_avg = averages()
     segs = "0" * 16 + "1" * 12 + "0" * 20
@@ -244,17 +338,17 @@ def status_body():
         "hum_avg": hum_avg,
         "sensor_ok": True,
         "sensor_error": None,
+        "sensor_at": SENSOR_AT,
         "sensor_interval_min": 15,
+        "categories": CATEGORIES,
         "log_keep": 100,
         "time_synced": True,
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "timezone": preview_timezone(),
+        "timezone": PREVIEW_TZ or preview_timezone(),
         "mem_used": 120304,
         "mem_free": 84216,
         "storage_used": 180224,
         "storage_free": 1400832,
-        "last_mist": next((row[0] for row in MAINT if row[1] == "mist"), None),
-        "last_feed": next((row[0] for row in MAINT if row[1] == "feed"), None),
         "boot": BOOT,
         "log_rev": 0,
         "maint_rev": MAINT_REV,
