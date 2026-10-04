@@ -1,0 +1,967 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Terrarium Climate Control</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:920px;margin:0 auto;padding:16px;background:#eef2ee;color:#1b1f1b}
+.title-row{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:4px 0 16px}
+h1{font-size:1.45em;margin:0}
+.meters{display:flex;flex-direction:column;gap:5px;flex:1;min-width:150px;max-width:340px;margin:0 8px}
+.meter{display:grid;grid-template-columns:2.2em minmax(48px,1fr) auto;align-items:center;gap:6px;color:#666;font-size:.72em}
+.bar{height:7px;background:#e4ece4;border-radius:99px;overflow:hidden}
+.bar div{height:100%;width:0;background:#2d6a4f}
+.meter .nums{white-space:nowrap}
+.device-time{color:#666;font-size:.85em;text-align:right;white-space:nowrap;line-height:1.35}
+h2{font-size:1.05em;margin:0 0 12px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px}
+.cat-scroll{display:contents}
+.cat-scroll:empty{display:none}
+@media(max-width:640px){
+  .cards{grid-template-columns:1fr}
+  .device-time{white-space:normal}
+  .title-row,.chart-card,.log-card{display:none}
+  .cat-scroll{display:flex;gap:10px;flex:1 0 100%;max-width:100%;overflow-x:auto;flex-wrap:nowrap}
+  .cat-scroll:empty{display:none}
+  .cat-scroll .cat-btn{flex:0 0 auto}
+  #maintActions .note-row{flex:1 1 100%;min-width:0;width:100%}
+  .maint-date{display:none}
+}
+.card{background:#fff;border-radius:14px;padding:16px 18px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.cards .card{margin-bottom:0}
+button.fan-card{display:block;width:100%;text-align:left;font:inherit;color:#1b1f1b;cursor:pointer}
+button.fan-card:hover{background:#f3f8f4}
+button.fan-card.stop{background:#fff;box-shadow:inset 0 0 0 2px #c0392b,0 1px 3px rgba(0,0,0,.12)}
+button.fan-card:disabled{cursor:default}
+button.fan-card,button.climate-card{position:relative}
+.icon-sprite{position:absolute;width:0;height:0;overflow:hidden}
+.touch-icon{position:absolute;top:12px;right:14px;width:22px;height:22px;color:#8b948b;pointer-events:none}
+button:disabled .touch-icon{display:none}
+button.climate-card{display:block;width:100%;text-align:left;font:inherit;color:#1b1f1b;cursor:pointer}
+button.climate-card:hover{background:#f7f8f4}
+button.climate-card:disabled{cursor:default}
+.delta.down{color:#c45c5c}
+.delta.up{color:#3f8a62}
+.kicker{font-size:.8em;color:#666;text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px}
+.big{font-size:1.7em;font-weight:700;line-height:1.15}
+.sub{color:#666;font-size:.9em;margin-top:6px;min-height:1.2em}
+.on{color:#2d6a4f}.off{color:#777}.err{color:#c0392b}.temp{color:#b35c00}.hum{color:#1d4e89}
+.muted{color:#666;font-size:.92em}
+button,.btn{font-size:.95em;font-weight:600;padding:10px 16px;border:0;border-radius:10px;background:#2d6a4f;color:#fff;cursor:pointer}
+button.stop{background:#c0392b}
+button.danger{background:#c0392b;color:#fff}
+button.secondary{background:#dde5dd;color:#1b1f1b}
+button:disabled{opacity:.5}
+.actions .danger{margin-left:auto}
+.seg{display:inline-flex;gap:4px;background:#e8eee8;padding:3px;border-radius:10px;flex-wrap:wrap}
+.seg button{background:transparent;color:#334;padding:7px 12px;box-shadow:none}
+.seg button.active{background:#fff;color:#1b1f1b}
+.chart-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.legend{display:flex;gap:14px;font-size:.85em;color:#555;flex-wrap:wrap}
+.swatch{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:middle}
+.hatch{border:1px solid #9cc3ad;background:repeating-linear-gradient(45deg,#7fb08f 0 1px,#e6f1ea 1px 4px),#e6f1ea}
+.hatch-x{border:1px solid #9cc3ad;background:repeating-linear-gradient(45deg,#7fb08f 0 1px,transparent 1px 4px),repeating-linear-gradient(-45deg,#7fb08f 0 1px,transparent 1px 4px),#e6f1ea}
+.chart-wrap{position:relative}
+canvas{width:100%;height:220px;display:block;background:#fafcfa;border-radius:10px;touch-action:manipulation}
+.tip{position:absolute;background:#1b1f1b;color:#fff;padding:8px 10px;border-radius:8px;font-size:.8em;pointer-events:none;white-space:pre;z-index:2;display:none}
+.note-link{color:#1d4e89;cursor:pointer;text-decoration:underline}
+.chart-foot{display:flex;justify-content:space-between;align-items:baseline;gap:8px 16px;margin-top:8px;flex-wrap:wrap}
+.avg-tip{margin-left:auto;color:#888;font-size:.78em;white-space:nowrap}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0}
+input{padding:8px;font-size:1em;border:1px solid #ccc;border-radius:8px;width:100px}
+input[type=checkbox]{width:auto;padding:0;accent-color:#2d6a4f}
+input.wide{width:100%;max-width:420px}
+pre{background:#111;color:#cfe8cf;padding:12px;border-radius:10px;max-height:360px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:0}
+.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+.field-note{margin:2px 0 0;line-height:1.4}
+.days{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.day{height:32px;padding:0;border-radius:4px;background:#e4ece4;color:#1b1f1b;font-size:.72em}
+.day.on{background:#2d6a4f;color:#fff}
+.hours{display:grid;grid-template-columns:repeat(12,1fr);font-size:.72em;color:#666;margin:10px 0 6px}
+.slots{display:grid;grid-template-columns:repeat(24,1fr);gap:3px}
+.slot{height:32px;padding:0;border-radius:4px;background:#e4ece4}
+.slot.on{background:#2d6a4f}
+.slot.now{box-shadow:inset 0 0 0 2px #1b1f1b}
+.slot.on.now{box-shadow:inset 0 0 0 2px #fff}
+table{width:100%;border-collapse:collapse;font-size:.9em;margin-top:8px}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
+th.del,td.del{text-align:right;width:1%;white-space:nowrap}
+button.x{background:none;color:#888;padding:0 4px;min-width:1.5em;font-size:1.15em;font-weight:700;line-height:1}
+button.x:hover{background:none;color:#c0392b}
+.pager{display:flex;gap:8px;align-items:center;margin-top:8px}
+.maint-list{margin-top:14px}
+.maint-list div{display:flex;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid #e4ece4}
+.maint-list div:last-child{border-bottom:0}
+.maint-main{flex:1;min-width:0;overflow-wrap:anywhere}
+.maint-kind{font-weight:700}
+.maint-date{color:#999;margin-left:auto;white-space:nowrap;text-align:right}
+.note-row{display:flex;gap:8px;flex:1 1 320px;min-width:min(100%,320px)}
+.note-row input{width:auto;flex:1;min-width:200px}
+.sheet{position:fixed;inset:0;z-index:5;display:flex;align-items:center;justify-content:center;padding:16px}
+.sheet[hidden]{display:none}
+.sheet-bg{position:absolute;inset:0;background:rgba(27,31,27,.4)}
+.sheet-panel{position:relative;background:#fff;border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:8px;min-width:220px;box-shadow:0 8px 24px rgba(0,0,0,.18)}
+.sheet-panel button{width:100%}
+.sheet-note{margin:0 0 4px;line-height:1.4;max-width:360px;overflow-wrap:anywhere}
+</style></head><body>
+<svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="touch-app" viewBox="0 0 24 24">
+    <!-- Icon from Material Symbols by Google - https://github.com/google/material-design-icons/blob/master/LICENSE -->
+    <path fill="currentColor" d="M10.475 22q-.7 0-1.312-.3t-1.038-.85l-5.45-6.925l.475-.5q.5-.525 1.2-.625t1.3.275L7.5 14.2V6q0-.425.288-.712T8.5 5t.725.288t.3.712v5H17q1.25 0 2.125.875T20 14v4q0 1.65-1.175 2.825T16 22zm-6.3-13.5q-.325-.55-.5-1.187T3.5 6q0-2.075 1.463-3.537T8.5 1t3.538 1.463T13.5 6q0 .675-.175 1.313t-.5 1.187l-1.725-1q.2-.35.3-.712T11.5 6q0-1.25-.875-2.125T8.5 3t-2.125.875T5.5 6q0 .425.1.788t.3.712z"/>
+  </symbol>
+</svg>
+<div class="title-row">
+  <h1>Terrarium Climate Control</h1>
+  <div class="meters">
+    <div class="meter"><span>Mem</span><div class="bar"><div id="memBar"></div></div><span id="memLine" class="nums"></span></div>
+    <div class="meter"><span>Sto</span><div class="bar"><div id="storeBar"></div></div><span id="storeLine" class="nums"></span></div>
+  </div>
+  <div class="device-time"><div id="time"></div><div id="tz"></div></div>
+</div>
+
+<div class="cards">
+  <button type="button" id="btn" class="card fan-card" onclick="press()" disabled>
+    <svg class="touch-icon" aria-hidden="true"><use href="#touch-app"/></svg>
+    <div class="kicker">Fan</div>
+    <div id="fanBig" class="big off">...</div>
+    <div id="fanSub" class="sub"></div>
+  </button>
+  <button type="button" id="tempCard" class="card climate-card" onclick="readNow()" disabled>
+    <svg class="touch-icon" aria-hidden="true"><use href="#touch-app"/></svg>
+    <div class="kicker">Temperature</div>
+    <div id="tempBig" class="big temp">...</div>
+    <div id="tempSub" class="sub"></div>
+  </button>
+  <button type="button" id="humCard" class="card climate-card" onclick="readNow()" disabled>
+    <svg class="touch-icon" aria-hidden="true"><use href="#touch-app"/></svg>
+    <div class="kicker">Humidity</div>
+    <div id="humBig" class="big hum">...</div>
+    <div id="humSub" class="sub"></div>
+  </button>
+</div>
+
+<div class="card chart-card">
+  <div class="chart-head">
+    <h2 style="margin:0">Temperature &amp; humidity</h2>
+    <div class="seg">
+      <button id="d1" onclick="setDays(1)">1 day</button>
+      <button id="d3" onclick="setDays(3)">3 days</button>
+      <button id="d7" class="active" onclick="setDays(7)">7 days</button>
+      <button id="d30" onclick="setDays(30)">30 days</button>
+    </div>
+  </div>
+  <div class="legend"><span><span class="swatch" style="background:#b35c00"></span>Temp °C</span>
+  <span><span class="swatch" style="background:#1d4e89"></span>Humidity %RH</span>
+  <span id="fanKey"><span class="swatch hatch"></span>Fan</span>
+  <span id="fanKeyOn"><span class="swatch hatch-x"></span>On-demand fan</span>
+  <span id="pauseKey" style="display:none"><span class="swatch" style="background:#d5dbd5;border:1px solid #c5ccc5"></span>Paused</span></div>
+  <div class="chart-wrap">
+    <canvas id="chart"></canvas>
+    <div id="tip" class="tip"></div>
+  </div>
+  <div class="chart-foot">
+    <div id="chartNote" class="muted"></div>
+    <div class="avg-tip">After 1 day: &#216; 1h &#183; 3 days: 4h &#183; 7 days: 12h &#183; Fan 7d</div>
+  </div>
+  <div id="samples" style="display:none">
+    <table><thead><tr><th>Time</th><th>Temperature</th><th>Humidity</th><th class="del"></th></tr></thead><tbody id="sampleRows"></tbody></table>
+    <div class="pager">
+      <button type="button" class="secondary" id="samplePrev" onclick="sampleStep(-1)">Newer</button>
+      <span id="samplePage" class="muted"></span>
+      <button type="button" class="secondary" id="sampleNext" onclick="sampleStep(1)">Older</button>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Maintenance</h2>
+  <div class="actions" id="maintActions">
+    <div class="cat-scroll" id="catScroll"></div>
+    <form class="note-row" onsubmit="event.preventDefault(); addNote();">
+      <input id="noteText" type="text" maxlength="120" placeholder="Note" autocomplete="off">
+      <button>Add note</button>
+    </form>
+  </div>
+  <div id="maintMsg" class="muted"></div>
+  <div id="noteMsg" class="muted"></div>
+  <div id="maintList" class="maint-list muted">Loading…</div>
+  <div class="pager" id="maintPager" style="display:none">
+    <button type="button" class="secondary" id="maintPrev" onclick="maintStep(-1)">Newer</button>
+    <span id="maintPage" class="muted"></span>
+    <button type="button" class="secondary" id="maintNext" onclick="maintStep(1)">Older</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Ventilation</h2>
+  <div id="days" class="days"></div>
+  <div id="slots"></div>
+  <form onsubmit="event.preventDefault(); saveSchedule();">
+    <div class="row"><label for="man">On-demand run (minutes)</label><input id="man" type="number" min="1" required></div>
+    <div class="row"><label for="hlim">Humidity limit (%)</label><input id="hlim" type="number" min="0" max="100" required></div>
+    <div class="row"><label for="hgate">Humidity gate (%)</label><input id="hgate" type="number" min="1" max="20" required></div>
+    <p class="muted field-note">Scheduled runs stop at or below the limit and resume above the limit plus the gate. 0 turns the limit off. On-demand runs ignore it.</p>
+    <div class="actions">
+      <button>Save</button>
+      <span id="schedMsg" class="muted"></span>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Advanced</h2>
+  <form onsubmit="event.preventDefault(); saveAdvanced();">
+    <div class="row"><label for="sint">Temperature read (min)</label><input id="sint" type="number" min="5" max="60" required></div>
+    <div class="row"><label for="lkeep">Log lines to keep</label><input id="lkeep" type="number" min="20" max="250" required></div>
+    <div class="row"><label for="tzName">Timezone</label><input id="tzName" class="wide" type="text" autocomplete="off" spellcheck="false" required></div>
+    <div class="row"><label for="cats">Maintenance categories</label><input id="cats" class="wide" type="text" maxlength="220" autocomplete="off"></div>
+    <div class="row"><label for="pauseRec">Pause recording</label><input id="pauseRec" type="checkbox"></div>
+    <div class="actions">
+      <button>Save</button>
+      <button type="button" class="secondary" onclick="openSheet('download')">Download</button>
+      <span id="advMsg" class="muted"></span>
+      <button type="button" class="danger" onclick="openSheet('purge')">Purge</button>
+    </div>
+  </form>
+</div>
+
+<div class="card log-card">
+  <h2>Log (newest first)</h2>
+  <pre id="log">Loading…</pre>
+</div>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-bg" onclick="closeSheet()"></div>
+  <div class="sheet-panel" id="sheetPanel" role="dialog" aria-modal="true"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const NL = String.fromCharCode(10);
+let formLoaded = false, chartDays = 7, chartPoints = [], chartFan = [], chartPauses = [], chartGeom = null;
+let patterns = {}, tipPinned = false, samplesOpen = false, samplePage = 0, sampleTotal = 0;
+let maintEvents = [], maintPage = 0, logKey = '', maintKey = '', catKey = '', reading = false;
+const PAGE_SIZE = 50, MAINT_PAGE = 5;
+function hatchPattern(ctx, cross) {
+  const key = cross ? 'x' : 's';
+  if (patterns[key]) return patterns[key];
+  const p = document.createElement('canvas'), n = 8;
+  p.width = p.height = n;
+  const g = p.getContext('2d');
+  g.fillStyle = 'rgba(45,106,79,0.08)'; g.fillRect(0, 0, n, n);
+  g.strokeStyle = 'rgba(45,106,79,0.35)'; g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(0, n); g.lineTo(n, 0);
+  if (cross) { g.moveTo(0, 0); g.lineTo(n, n); }
+  g.stroke();
+  return patterns[key] = ctx.createPattern(p, 'repeat');
+}
+function fmt(s) {
+  s = Math.max(0, s | 0);
+  const total = (s + 59) / 60 | 0;
+  const h = total / 60 | 0, m = total % 60;
+  return (h ? h + 'h ' : '') + m + 'm';
+}
+function ago(ts) {
+  if (ts === null || ts === undefined) return 'never';
+  const s = Math.max(0, (Date.now() / 1000 - ts) | 0);
+  if (s < 60) return 'just now';
+  if (s < 3600) return (s / 60 | 0) + ' min ago';
+  if (s < 86400) {
+    const h = s / 3600 | 0;
+    return h + (h === 1 ? ' hr ago' : ' hrs ago');
+  }
+  const d = s / 86400 | 0;
+  return d + (d === 1 ? ' day ago' : ' days ago');
+}
+function clock(ts) {
+  const df = {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'};
+  return new Date(ts * 1000).toLocaleString([], df);
+}
+function mark(p) { return p[3] > 0 ? '\u00d8 ' : ''; }
+async function req(url, opts) {
+  const r = await fetch(url, opts);
+  const t = await r.text();
+  if (!r.ok) throw new Error(t);
+  return t;
+}
+function post(url, data, signal) {
+  return req(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data || {}), signal: signal});
+}
+function setDays(d) {
+  chartDays = d;
+  ['d1','d3','d7','d30'].forEach(id => $(id).classList.toggle('active', id === 'd' + d));
+  samplePage = 0;
+  loadHistory();
+  if (samplesOpen) loadSamples();
+}
+function axisTicks(x0, x1, step) {
+  const out = [];
+  const d = new Date((x0 + 1) * 1000);
+  const push = () => {
+    let guard = 0;
+    while (d.getTime() / 1000 < x1 && guard++ < 900) {
+      const t = d.getTime() / 1000;
+      const prev = d.getTime();
+      if (t > x0 && t < x1) out.push(t);
+      if (step >= 86400) d.setDate(d.getDate() + (step / 86400 | 0));
+      else d.setHours(d.getHours() + (step / 3600 | 0));
+      if (d.getTime() <= prev) break;
+    }
+  };
+  if (step >= 86400) {
+    d.setHours(0, 0, 0, 0);
+    if (d.getTime() / 1000 <= x0) d.setDate(d.getDate() + (step / 86400 | 0));
+    push();
+  } else {
+    const hours = step / 3600 | 0;
+    d.setMinutes(0, 0, 0);
+    const h = d.getHours();
+    const add = (hours - (h % hours)) % hours;
+    if (add === 0 && d.getTime() / 1000 <= x0) d.setHours(h + hours);
+    else if (add) d.setHours(h + add);
+    push();
+  }
+  return out;
+}
+function axisText(ts, step, span) {
+  const d = new Date(ts * 1000);
+  if (step >= 86400) return d.toLocaleString([], {month:'short', day:'numeric'});
+  const time = d.toLocaleString([], {hour:'2-digit', minute:'2-digit'});
+  if (span > 36 * 3600) return d.toLocaleString([], {month:'short', day:'numeric'}) + ' ' + time;
+  return time;
+}
+function hourStart(ts) {
+  const d = new Date(ts * 1000);
+  d.setMinutes(0, 0, 0);
+  return d.getTime() / 1000;
+}
+function hourEnd(ts) {
+  const d = new Date(ts * 1000);
+  if (d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0) return ts;
+  d.setMinutes(0, 0, 0);
+  d.setHours(d.getHours() + 1);
+  return d.getTime() / 1000;
+}
+function drawChart() {
+  const c = $('chart'), ctx = c.getContext('2d');
+  const dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const pad = {l:40, r:40, t:16, b:28};
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#fafcfa'; ctx.fillRect(0, 0, W, H);
+  const pts = chartPoints;
+  const pauses = chartPauses;
+  chartGeom = null;
+  if (!pts.length && !pauses.length) {
+    ctx.fillStyle = '#888'; ctx.font = '14px system-ui';
+    ctx.fillText('No history yet. Samples are stored once the clock is synced.', pad.l, H / 2);
+    return;
+  }
+  let tMin = Infinity, tMax = -Infinity, hMin = Infinity, hMax = -Infinity;
+  pts.forEach(p => { tMin = Math.min(tMin, p[1]); tMax = Math.max(tMax, p[1]); hMin = Math.min(hMin, p[2]); hMax = Math.max(hMax, p[2]); });
+  if (!pts.length) { tMin = 15; tMax = 30; hMin = 0; hMax = 100; }
+  if (tMax === tMin) { tMin -= 1; tMax += 1; }
+  if (hMax === hMin) { hMin = Math.max(0, hMin - 5); hMax = Math.min(100, hMax + 5); }
+  tMin = Math.floor(tMin) - 1; tMax = Math.ceil(tMax) + 1;
+  hMin = Math.max(0, Math.floor(hMin) - 5); hMax = Math.min(100, Math.ceil(hMax) + 5);
+  let x0 = pts.length ? pts[0][0] : pauses[0][0];
+  let x1 = pts.length ? pts[pts.length - 1][0] : pauses[0][1];
+  pauses.forEach(g => { x0 = Math.min(x0, g[0]); x1 = Math.max(x1, g[1]); });
+  x0 = hourStart(x0);
+  x1 = hourEnd(x1);
+  if (x1 <= x0) x1 = x0 + 3600;
+  const x = ts => pad.l + (ts - x0) / Math.max(1, x1 - x0) * (W - pad.l - pad.r);
+  const yT = v => pad.t + (1 - (v - tMin) / (tMax - tMin)) * (H - pad.t - pad.b);
+  const yH = v => pad.t + (1 - (v - hMin) / (hMax - hMin)) * (H - pad.t - pad.b);
+  chartGeom = {x0, x1, pad, W, H, x, yT, yH, pts};
+  pauses.forEach(g => {
+    if (g[1] < x0 || g[0] > x1) return;
+    const a = x(Math.max(g[0], x0)), w = x(Math.min(g[1], x1)) - a;
+    ctx.fillStyle = '#d5dbd5';
+    ctx.fillRect(a, pad.t, Math.max(1, w), H - pad.t - pad.b);
+  });
+  chartFan.forEach(r => {
+    if (r[1] < x0 || r[0] > x1) return;
+    const a = x(Math.max(r[0], x0)), w = x(Math.min(r[1], x1)) - a;
+    const cross = r[2] === 1;
+    ctx.fillStyle = w >= 6 ? hatchPattern(ctx, cross) : (cross ? 'rgba(45,106,79,0.45)' : 'rgba(45,106,79,0.28)');
+    ctx.fillRect(a, pad.t, Math.max(1, w), H - pad.t - pad.b);
+  });
+  ctx.strokeStyle = '#e0e6e0'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const yy = pad.t + i * (H - pad.t - pad.b) / 4;
+    ctx.beginPath(); ctx.moveTo(pad.l, yy); ctx.lineTo(W - pad.r, yy); ctx.stroke();
+  }
+  ctx.font = '11px system-ui'; ctx.fillStyle = '#888';
+  ctx.fillText(tMax.toFixed(0) + '\u00b0', 4, pad.t + 4);
+  ctx.fillText(tMin.toFixed(0) + '\u00b0', 4, H - pad.b);
+  ctx.textAlign = 'right';
+  ctx.fillText(hMax.toFixed(0) + '%', W - 4, pad.t + 4);
+  ctx.fillText(hMin.toFixed(0) + '%', W - 4, H - pad.b);
+  ctx.textAlign = 'left';
+  function bridged(prev, ts) {
+    return pauses.some(g => g[0] < ts && g[1] > prev);
+  }
+  function line(color, yfn, idx) {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+    pts.forEach((p, i) => {
+      const X = x(p[0]), Y = yfn(p[idx]);
+      if (!i || bridged(pts[i - 1][0], p[0])) ctx.moveTo(X, Y);
+      else ctx.lineTo(X, Y);
+    });
+    ctx.stroke();
+  }
+  if (pts.length) {
+    line('#1d4e89', yH, 2);
+    line('#b35c00', yT, 1);
+  }
+  ctx.fillStyle = '#666';
+  const startLabel = clock(x0), endLabel = clock(x1);
+  const gap = 16;
+  const leftLimit = pad.l + ctx.measureText(startLabel).width + gap;
+  const rightLimit = W - pad.r - ctx.measureText(endLabel).width - gap;
+  const span = x1 - x0;
+  const steps = [3600, 7200, 10800, 21600, 43200, 86400, 172800, 432000, 604800];
+  let drawn = [];
+  for (let s = 0; s < steps.length && !drawn.length; s++) {
+    const step = steps[s];
+    if (step >= span * 0.9) continue;
+    const placed = [];
+    let edge = leftLimit - gap, blocked = false;
+    axisTicks(x0, x1, step).forEach(ts => {
+      if (blocked) return;
+      const text = axisText(ts, step, span);
+      const w = ctx.measureText(text).width, cx = x(ts);
+      const left = cx - w / 2, right = cx + w / 2;
+      if (left < leftLimit || right > rightLimit) return;
+      if (left < edge + gap) { blocked = true; return; }
+      placed.push({text: text, cx: cx});
+      edge = right;
+    });
+    if (!blocked && placed.length) drawn = placed;
+  }
+  ctx.fillText(startLabel, pad.l, H - 8);
+  ctx.textAlign = 'center';
+  drawn.forEach(lab => ctx.fillText(lab.text, lab.cx, H - 8));
+  ctx.textAlign = 'right';
+  ctx.fillText(endLabel, W - pad.r, H - 8);
+  ctx.textAlign = 'left';
+}
+function nearestPoint(clientX) {
+  if (!chartGeom || !chartGeom.pts.length) return null;
+  const rect = $('chart').getBoundingClientRect();
+  const px = clientX - rect.left;
+  const g = chartGeom;
+  let best = g.pts[0], bestD = Infinity;
+  g.pts.forEach(p => {
+    const d = Math.abs(g.x(p[0]) - px);
+    if (d < bestD) { best = p; bestD = d; }
+  });
+  return best;
+}
+function showTip(e, pin) {
+  const p = nearestPoint(e.clientX);
+  const tip = $('tip');
+  if (!p) { tip.style.display = 'none'; return; }
+  const g = chartGeom;
+  tip.textContent = clock(p[0]) + NL + mark(p) + p[1].toFixed(1) + ' \u00b0C' + NL + mark(p) + p[2].toFixed(1) + '%';
+  const x = g.x(p[0]), y = Math.min(g.yT(p[1]), g.yH(p[2]));
+  tip.style.left = Math.min(x + 8, g.W - 140) + 'px';
+  tip.style.top = Math.max(4, y - 56) + 'px';
+  tip.style.display = 'block';
+  if (pin) tipPinned = true;
+}
+function hideTip() {
+  tipPinned = false;
+  $('tip').style.display = 'none';
+}
+async function loadHistory() {
+  try {
+    const h = JSON.parse(await req('/api/history?days=' + chartDays));
+    chartPoints = h.points || [];
+    const showFan = chartDays <= 7;
+    chartFan = showFan && h.fan ? h.fan : [];
+    chartPauses = h.pauses || [];
+    $('fanKey').style.display = showFan ? '' : 'none';
+    $('fanKeyOn').style.display = showFan ? '' : 'none';
+    $('pauseKey').style.display = chartPauses.length ? '' : 'none';
+    const n = h.count || 0;
+    const note = $('chartNote');
+    note.className = 'muted';
+    note.textContent = '';
+    if (n) {
+      const a = document.createElement('a');
+      a.href = '#samples';
+      a.className = 'note-link';
+      a.textContent = n + (n === 1 ? ' sample' : ' samples');
+      a.onclick = ev => { ev.preventDefault(); toggleSamples(); };
+      note.appendChild(a);
+    } else {
+      note.textContent = 'No samples in this window yet. History starts after the clock syncs from the internet.';
+    }
+    drawChart();
+  } catch (e) {
+    $('chartNote').textContent = 'Could not load history.';
+  }
+}
+function toggleSamples() {
+  samplesOpen = !samplesOpen;
+  $('samples').style.display = samplesOpen ? '' : 'none';
+  if (samplesOpen) { samplePage = 0; loadSamples(); }
+}
+async function loadSamples() {
+  try {
+    const h = JSON.parse(await req('/api/history?days=' + chartDays + '&page=' + samplePage));
+    sampleTotal = h.total || 0;
+    const body = $('sampleRows');
+    body.textContent = '';
+    (h.samples || []).forEach(p => {
+      const tr = document.createElement('tr');
+      [clock(p[0]), mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C', mark(p) + Number(p[2]).toFixed(1) + '%'].forEach(text => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      const del = document.createElement('td');
+      del.className = 'del';
+      del.appendChild(deleteCross(() => confirmDelete(sampleLabel(p), () => removeSample(p))));
+      tr.appendChild(del);
+      body.appendChild(tr);
+    });
+    const pages = Math.max(1, Math.ceil(sampleTotal / PAGE_SIZE));
+    $('samplePage').textContent = 'Page ' + (samplePage + 1) + ' of ' + pages;
+    $('samplePrev').disabled = samplePage <= 0;
+    $('sampleNext').disabled = (samplePage + 1) * PAGE_SIZE >= sampleTotal;
+  } catch (e) {
+    $('sampleRows').textContent = '';
+  }
+}
+function sampleStep(d) {
+  samplePage = Math.max(0, samplePage + d);
+  loadSamples();
+}
+function fmtBytes(n) {
+  if (n === null || n === undefined) return '\u2014';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return Math.round(n / 1024) + ' KB';
+  const mb = n / 1048576;
+  return (mb >= 10 ? Math.round(mb) : mb.toFixed(1)) + ' MB';
+}
+function paintMeter(barId, textId, used, free) {
+  const known = used !== null && used !== undefined && free !== null && free !== undefined;
+  const total = known ? used + free : 0;
+  $(barId).style.width = total > 0 ? Math.min(100, used / total * 100) + '%' : '0';
+  $(textId).textContent = known ? fmtBytes(used) + ' / ' + fmtBytes(total) : '\u2014';
+}
+function diffNodes(avg, cur, unit) {
+  const wrap = document.createDocumentFragment();
+  const avgSpan = document.createElement('span');
+  avgSpan.textContent = '\u00d8 ' + avg.toFixed(1) + unit + ' \u00b7 ';
+  wrap.appendChild(avgSpan);
+  const d = cur - avg;
+  const diff = document.createElement('span');
+  const mark = d > 0 ? '\u25b2 ' : (d < 0 ? '\u25bc ' : '');
+  diff.textContent = mark + Math.abs(d).toFixed(1);
+  if (d < 0) diff.className = 'delta down';
+  else if (d > 0) diff.className = 'delta up';
+  wrap.appendChild(diff);
+  return wrap;
+}
+function paintSub(el, parts) {
+  el.textContent = '';
+  parts.forEach(part => {
+    if (part) el.appendChild(typeof part === 'string' ? document.createTextNode(part) : part);
+  });
+}
+function fanLine(s) {
+  if (s.fan_on) return s.mode + ' \u00b7 ' + fmt(s.remaining_s) + ' left';
+  if (s.mode === 'Humidity hold') return 'Humidity hold';
+  if (!s.time_synced) return 'Waiting for clock';
+  if (s.next_run_s !== null && s.next_run_s !== undefined) return 'Next scheduled run in ' + fmt(s.next_run_s);
+  return 'Schedule off';
+}
+function toggleButton(cls, on, label) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls + (on ? ' on' : '');
+  b.setAttribute('aria-label', label);
+  b.onclick = () => b.classList.toggle('on');
+  return b;
+}
+function bitString(selector) {
+  let s = '';
+  document.querySelectorAll(selector).forEach(b => { s += b.classList.contains('on') ? '1' : '0'; });
+  return s;
+}
+function paintDays(str) {
+  const box = $('days');
+  box.textContent = '';
+  ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].forEach((name, i) => {
+    const b = toggleButton('day', !str || str.charAt(i) !== '0', name);
+    b.textContent = name;
+    box.appendChild(b);
+  });
+}
+function markNow(time) {
+  const slots = document.querySelectorAll('#slots .slot');
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/.exec(time || '');
+  const index = m ? (+m[4]) * 2 + ((+m[5]) >= 30 ? 1 : 0) : -1;
+  slots.forEach((b, i) => {
+    const current = i === index;
+    b.classList.toggle('now', current);
+    if (current) b.setAttribute('aria-current', 'time');
+    else b.removeAttribute('aria-current');
+  });
+}
+function paintSlots(str) {
+  const box = $('slots');
+  box.textContent = '';
+  for (let row = 0; row < 2; row++) {
+    const labels = document.createElement('div');
+    labels.className = 'hours';
+    const grid = document.createElement('div');
+    grid.className = 'slots';
+    for (let hour = 0; hour < 12; hour++) {
+      const lab = document.createElement('span');
+      lab.textContent = String(row * 12 + hour).padStart(2, '0');
+      labels.appendChild(lab);
+      for (let half = 0; half < 2; half++) {
+        const i = (row * 12 + hour) * 2 + half;
+        const label = String(row * 12 + hour).padStart(2, '0') + (half ? ':30' : ':00');
+        grid.appendChild(toggleButton('slot', str && str.charAt(i) === '1', label));
+      }
+    }
+    box.appendChild(labels);
+    box.appendChild(grid);
+  }
+}
+async function refresh() {
+  try {
+    const s = JSON.parse(await req('/api/status'));
+    const clockText = s.time || '';
+    $('time').textContent = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(clockText) ? clockText.slice(0, -3) : clockText;
+    $('tz').textContent = s.timezone || '';
+    $('fanBig').textContent = s.fan_on ? 'ON' : 'OFF';
+    $('fanBig').className = 'big ' + (s.fan_on ? 'on' : 'off');
+    $('fanSub').textContent = fanLine(s);
+    const age = (s.sensor_at === null || s.sensor_at === undefined) ? '' : ago(s.sensor_at);
+    if (!reading) {
+      if (s.temp_c === null || s.temp_c === undefined) {
+        $('tempBig').textContent = '\u2014';
+        $('humBig').textContent = '\u2014';
+        const wait = s.sensor_error ? 'unavailable' : 'waiting\u2026';
+        $('tempSub').textContent = age ? age + ' \u00b7 ' + wait : wait;
+        $('humSub').textContent = age ? age + ' \u00b7 ' + wait : wait;
+      } else {
+        $('tempBig').textContent = s.temp_c.toFixed(1) + ' \u00b0C';
+        $('humBig').textContent = s.humidity.toFixed(1) + '%';
+        const prefix = age ? age + ' \u00b7 ' : '';
+        if (s.temp_avg === null || s.temp_avg === undefined) {
+          paintSub($('tempSub'), [prefix + (s.sensor_ok ? 'air temperature' : 'stale reading')]);
+          paintSub($('humSub'), [prefix + (s.sensor_ok ? 'relative humidity' : 'stale reading')]);
+        } else {
+          paintSub($('tempSub'), [prefix, diffNodes(s.temp_avg, s.temp_c, ' \u00b0C')]);
+          paintSub($('humSub'), [prefix, diffNodes(s.hum_avg, s.humidity, '%')]);
+        }
+      }
+    }
+    paintMeter('memBar', 'memLine', s.mem_used, s.mem_free);
+    paintMeter('storeBar', 'storeLine', s.storage_used, s.storage_free);
+    syncCategories(s.categories || []);
+    $('btn').setAttribute('aria-label', s.fan_on ? 'Stop fan' : 'Start for ' + s.manual_min + ' min');
+    $('btn').className = 'card fan-card' + (s.fan_on ? ' stop' : '');
+    $('btn').disabled = false;
+    $('tempCard').disabled = reading;
+    $('humCard').disabled = reading;
+    if (!formLoaded) {
+      $('man').value = s.manual_min;
+      $('hlim').value = s.humidity_limit || 0;
+      $('hgate').value = s.humidity_gate || 5;
+      $('sint').value = s.sensor_interval_min;
+      $('lkeep').value = s.log_keep;
+      $('tzName').value = s.timezone || '';
+      $('cats').value = (s.categories || []).join(', ');
+      $('pauseRec').checked = s.record === 0;
+      paintDays(s.weekdays || '');
+      paintSlots(s.segments || '');
+      formLoaded = true;
+    }
+    markNow(s.time);
+    const lk = s.boot + ':' + s.log_rev;
+    const hideLog = window.matchMedia('(max-width: 640px)').matches;
+    if (!hideLog && lk !== logKey) {
+      const logs = await req('/api/logs');
+      $('log').textContent = logs.trim() ? logs.trim().split(NL).reverse().join(NL) : 'No log entries yet.';
+      logKey = lk;
+    }
+    const mk = s.boot + ':' + s.maint_rev;
+    if (mk !== maintKey) {
+      maintEvents = JSON.parse(await req('/api/maintenance')).events || [];
+      maintKey = mk;
+    }
+    renderMaint();
+  } catch (e) {
+    $('fanBig').textContent = '\u2014';
+    $('fanBig').className = 'big err';
+    $('fanSub').textContent = 'Device unreachable';
+    $('btn').disabled = true;
+    $('tempCard').disabled = true;
+    $('humCard').disabled = true;
+  }
+}
+async function press() {
+  $('btn').disabled = true;
+  try { await post('/api/button'); } catch (e) {}
+  refresh();
+}
+function maintRow(ev) {
+  const row = document.createElement('div');
+  const main = document.createElement('span');
+  main.className = 'maint-main';
+  const kind = document.createElement('span');
+  kind.className = 'maint-kind';
+  kind.textContent = ev[1] === 'note' ? 'Note' : ev[1];
+  main.appendChild(kind);
+  if (ev[1] === 'note' && ev[2]) main.appendChild(document.createTextNode(': ' + ev[2]));
+  main.appendChild(document.createTextNode(' \u00b7 ' + ago(ev[0])));
+  const date = document.createElement('span');
+  date.className = 'maint-date';
+  date.textContent = clock(ev[0]);
+  row.appendChild(main);
+  row.appendChild(date);
+  row.appendChild(deleteCross(() => confirmDelete(maintLabel(ev), () => removeMaint(ev))));
+  return row;
+}
+function renderMaint() {
+  const list = $('maintList');
+  const pager = $('maintPager');
+  list.textContent = '';
+  const n = maintEvents.length;
+  if (!n) {
+    list.className = 'maint-list muted';
+    list.textContent = 'Nothing recorded yet.';
+    pager.style.display = 'none';
+    return;
+  }
+  const pages = Math.ceil(n / MAINT_PAGE);
+  if (maintPage >= pages) maintPage = pages - 1;
+  if (maintPage < 0) maintPage = 0;
+  list.className = 'maint-list';
+  maintEvents.slice(maintPage * MAINT_PAGE, maintPage * MAINT_PAGE + MAINT_PAGE).forEach(ev => {
+    list.appendChild(maintRow(ev));
+  });
+  pager.style.display = pages > 1 ? 'flex' : 'none';
+  $('maintPage').textContent = 'Page ' + (maintPage + 1) + ' of ' + pages;
+  $('maintPrev').disabled = maintPage <= 0;
+  $('maintNext').disabled = maintPage + 1 >= pages;
+}
+function maintStep(d) {
+  maintPage = Math.max(0, maintPage + d);
+  renderMaint();
+}
+function syncCategories(names) {
+  const key = (names || []).join('\n');
+  if (key !== catKey) {
+    catKey = key;
+    const row = $('catScroll');
+    row.textContent = '';
+    (names || []).forEach(name => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'cat-btn';
+      b.textContent = name;
+      b.onclick = () => addMaint({kind: name}, 'maintMsg');
+      row.appendChild(b);
+    });
+  }
+}
+async function readNow() {
+  if (reading) return;
+  reading = true;
+  $('tempCard').disabled = true;
+  $('humCard').disabled = true;
+  $('tempSub').textContent = 'Reading\u2026';
+  $('humSub').textContent = 'Reading\u2026';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  let timedOut = false;
+  try {
+    await post('/api/sensor', {}, ctrl.signal);
+  } catch (e) {
+    timedOut = e.name === 'AbortError';
+  } finally {
+    clearTimeout(timer);
+    reading = false;
+  }
+  if (timedOut) {
+    $('tempSub').textContent = 'Timed out';
+    $('humSub').textContent = 'Timed out';
+    $('tempCard').disabled = false;
+    $('humCard').disabled = false;
+    return;
+  }
+  refresh();
+}
+async function addMaint(data, msgId) {
+  const msg = $(msgId);
+  msg.textContent = '';
+  msg.className = 'muted';
+  try {
+    maintEvents = JSON.parse(await post('/api/maintenance', data)).events || [];
+    maintPage = 0;
+    renderMaint();
+    refresh();
+    return true;
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.className = 'err';
+    return false;
+  }
+}
+async function addNote() {
+  if (await addMaint({kind: 'note', text: $('noteText').value}, 'noteMsg')) $('noteText').value = '';
+}
+async function submit(msgId, busy, done, url, data, after) {
+  const msg = $(msgId);
+  msg.textContent = busy; msg.className = 'muted';
+  try {
+    await post(url, data);
+    msg.textContent = done;
+    refresh();
+    if (after) after();
+  } catch (e) { msg.textContent = e.message; msg.className = 'err'; }
+}
+function saveSchedule() {
+  submit('schedMsg', 'Saving\u2026', 'Saved.', '/api/schedule', {
+    segments: bitString('#slots .slot'), weekdays: bitString('#days .day'), manual_min: +$('man').value,
+    humidity_limit: +$('hlim').value, humidity_gate: +$('hgate').value});
+}
+function saveAdvanced() {
+  submit('advMsg', 'Saving\u2026', 'Saved.', '/api/settings', {
+    sensor_interval_min: +$('sint').value, log_keep: +$('lkeep').value,
+    timezone: $('tzName').value, maint_categories: $('cats').value,
+    record: $('pauseRec').checked ? 0 : 1}, loadHistory);
+}
+function deleteCross(action) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'x';
+  b.setAttribute('aria-label', 'Delete');
+  b.textContent = '\u00d7';
+  b.onclick = action;
+  return b;
+}
+function sampleLabel(p) {
+  return clock(p[0]) + ' \u00b7 ' + mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C \u00b7 ' + mark(p) + Number(p[2]).toFixed(1) + '%';
+}
+function maintLabel(ev) {
+  const kind = ev[1] === 'note' ? 'Note' : ev[1];
+  const note = ev[1] === 'note' && ev[2] ? ': ' + ev[2] : '';
+  return kind + note + ' \u00b7 ' + clock(ev[0]);
+}
+function confirmDelete(message, action) {
+  const panel = $('sheetPanel');
+  panel.textContent = '';
+  const note = document.createElement('div');
+  note.className = 'sheet-note';
+  note.textContent = message;
+  panel.appendChild(note);
+  const yes = document.createElement('button');
+  yes.type = 'button';
+  yes.className = 'danger';
+  yes.textContent = 'Delete';
+  yes.onclick = () => { closeSheet(); action(); };
+  panel.appendChild(yes);
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'secondary';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = closeSheet;
+  panel.appendChild(cancel);
+  $('sheet').hidden = false;
+}
+async function removeSample(p) {
+  try {
+    await post('/api/history-delete', {ts: p[0]});
+    if (samplePage > 0 && sampleTotal <= samplePage * PAGE_SIZE + 1) samplePage -= 1;
+    await loadHistory();
+    if (samplesOpen) await loadSamples();
+  } catch (e) {
+    const note = $('chartNote');
+    note.textContent = e.message;
+    note.className = 'err';
+  }
+}
+async function removeMaint(ev) {
+  const msg = $('maintMsg');
+  msg.textContent = '';
+  msg.className = 'muted';
+  try {
+    maintEvents = JSON.parse(await post('/api/maintenance-delete', {
+      ts: ev[0], kind: ev[1], text: ev[2] || ''})).events || [];
+    const pages = Math.ceil(maintEvents.length / MAINT_PAGE) || 1;
+    if (maintPage >= pages) maintPage = pages - 1;
+    renderMaint();
+    refresh();
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.className = 'err';
+  }
+}
+function closeSheet() { $('sheet').hidden = true; }
+function openSheet(kind) {
+  const panel = $('sheetPanel');
+  panel.textContent = '';
+  [['Log', 'log'], ['Climate history', 'history'], ['Maintenance', 'maintenance'], ['All', 'all']].forEach(([label, which]) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    if (kind === 'purge') b.className = 'danger';
+    b.onclick = () => {
+      closeSheet();
+      if (kind === 'purge') purgeWhich(which);
+      else downloadWhich(which);
+    };
+    panel.appendChild(b);
+  });
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'secondary';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = closeSheet;
+  panel.appendChild(cancel);
+  $('sheet').hidden = false;
+}
+function purgeWhich(which) {
+  const jobs = {
+    log: ['/api/purge-log', 'Log purged.'],
+    history: ['/api/purge-history', 'Climate history purged.', loadHistory],
+    maintenance: ['/api/purge-maintenance', 'Maintenance purged.'],
+    all: ['/api/purge-all', 'All stored history purged.', loadHistory],
+  };
+  const job = jobs[which];
+  submit('advMsg', 'Purging\u2026', job[1], job[0], {}, job[2]);
+}
+function downloadWhich(which) {
+  const a = document.createElement('a');
+  a.href = '/api/download?which=' + which;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+const chartEl = $('chart');
+chartEl.addEventListener('pointermove', e => { if (e.pointerType === 'mouse' && !tipPinned) showTip(e, false); });
+chartEl.addEventListener('pointerdown', e => showTip(e, e.pointerType !== 'mouse'));
+chartEl.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' && !tipPinned) hideTip(); });
+addEventListener('pointerdown', e => {
+  if (tipPinned && e.target !== chartEl) hideTip();
+});
+refresh();
+loadHistory();
+setInterval(refresh, 10000);
+setInterval(loadHistory, 60000);
+addEventListener('resize', drawChart);
+</script>
+</body></html>

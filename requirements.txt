@@ -1,0 +1,4 @@
+# PC tools only. Install these into .venv.
+# mpy-cross must match the MicroPython version flashed on the ESP32-C3.
+mpy-cross
+mpremote

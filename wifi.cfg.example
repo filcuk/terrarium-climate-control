@@ -1,0 +1,12 @@
+# Copy this file to the board as wifi.cfg and fill in your network.
+ssid=YourNetworkName
+password=YourWifiPassword
+
+# Optional: name on the local network, opens as http://terrarium.local/
+# Letters, digits and hyphens only. Defaults to "terrarium".
+hostname=terrarium1
+
+# Optional: local timezone. Summer time is applied for the built-in names.
+# UTC, Europe/London, Europe/Paris, America/New_York, America/Chicago,
+# America/Denver, America/Los_Angeles. Default is Europe/London.
+timezone=Europe/London
