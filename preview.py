@@ -101,14 +101,22 @@ BOOT = int(time.time())
 CATEGORIES = ["Mist", "Feed", "Soil", "Deco"]
 SENSOR_AT = None
 PREVIEW_TZ = None
+SAMPLE_PAUSE = None
+RECORDING = True
+PAUSE_SINCE = 0
+PAUSES = []
+HUMIDITY_LIMIT = 0
+HUMIDITY_GATE = 5
 
 
 def ensure_data():
-    global POINTS, FANS, MAINT
+    global POINTS, FANS, MAINT, SAMPLE_PAUSE
     now = int(time.time())
     if POINTS is None:
         POINTS = climate_points(now)
         FANS = fan_runs(now)
+        SAMPLE_PAUSE = (now - 20 * 3600, now - 18 * 3600)
+        POINTS = [p for p in POINTS if p[0] < SAMPLE_PAUSE[0] or p[0] > SAMPLE_PAUSE[1]]
         MAINT = [
             [now - 2 * 3600, "Mist", ""],
             [now - 26 * 3600, "Feed", ""],
@@ -162,15 +170,19 @@ def download_body(which):
     log = log_text() + "\n"
     climate = "".join("%d,%.1f,%.1f\n" % (p[0], p[1], p[2]) for p in POINTS)
     fan = "".join("%d,%d,%d\n" % (r[0], r[1], r[2]) for r in FANS)
+    pause_rows = list(PAUSES)
+    if SAMPLE_PAUSE:
+        pause_rows = [SAMPLE_PAUSE] + pause_rows
+    pause = "".join("%d,%d\n" % (row[0], row[1]) for row in pause_rows)
     maint = "".join("%d,%s%s\n" % (row[0], row[1], ("," + row[2]) if row[2] else "") for row in MAINT)
     if which == "log":
         return log, download_filename("events.log")
     if which == "maintenance":
         return maint, download_filename("maintenance.hist")
     if which == "history":
-        return "# climate.hist\n" + climate + "# fan.hist\n" + fan, download_filename("climate.txt")
+        return "# climate.hist\n" + climate + "# fan.hist\n" + fan + "# pause.hist\n" + pause, download_filename("climate.txt")
     if which == "all":
-        body = "# events.log\n" + log + "# climate.hist\n" + climate + "# fan.hist\n" + fan + "# maintenance.hist\n" + maint
+        body = "# events.log\n" + log + "# climate.hist\n" + climate + "# fan.hist\n" + fan + "# pause.hist\n" + pause + "# maintenance.hist\n" + maint
         return body, download_filename("terrarium.txt")
     return None, None
 
@@ -233,6 +245,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global MAINT_REV, CATEGORIES, PREVIEW_TZ, SENSOR_AT, POINTS
+        global RECORDING, PAUSE_SINCE, PAUSES, SAMPLE_PAUSE, HUMIDITY_LIMIT, HUMIDITY_GATE
         ensure_data()
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -280,7 +293,79 @@ class Handler(BaseHTTPRequestHandler):
                 return
             PREVIEW_TZ = zone
             CATEGORIES = parse_categories(str(data.get("maint_categories") or ""))
+            try:
+                record = int(data.get("record", 1))
+            except (TypeError, ValueError):
+                record = 1
+            now = int(time.time())
+            if record:
+                if not RECORDING and PAUSE_SINCE:
+                    PAUSES.append((PAUSE_SINCE, now))
+                PAUSE_SINCE = 0
+                RECORDING = True
+            else:
+                if RECORDING and not PAUSE_SINCE:
+                    PAUSE_SINCE = now
+                RECORDING = False
             self._send(200, "application/json", json.dumps(status_body()))
+            return
+        if path == "/api/schedule":
+            if data is None:
+                self._send(400, "text/plain", "Invalid schedule.")
+                return
+            try:
+                limit = int(data.get("humidity_limit", 0))
+                gate = int(data.get("humidity_gate", 5))
+            except (TypeError, ValueError):
+                self._send(400, "text/plain", "Invalid schedule.")
+                return
+            if not 0 <= limit <= 100:
+                self._send(400, "text/plain", "Humidity limit must be 0-100.")
+                return
+            if not 1 <= gate <= 20:
+                self._send(400, "text/plain", "Humidity gate must be 1-20.")
+                return
+            HUMIDITY_LIMIT = limit
+            HUMIDITY_GATE = gate
+            self._send(200, "application/json", json.dumps(status_body()))
+            return
+        if path == "/api/history-delete":
+            if data is None:
+                self._send(400, "text/plain", "Sample not found.")
+                return
+            try:
+                ts = int(data.get("ts"))
+            except (TypeError, ValueError):
+                self._send(400, "text/plain", "Sample not found.")
+                return
+            kept = [p for p in POINTS if int(p[0]) != ts]
+            if len(kept) == len(POINTS):
+                self._send(400, "text/plain", "Sample not found.")
+                return
+            POINTS = kept
+            self._send(200, "application/json", json.dumps(status_body()))
+            return
+        if path == "/api/maintenance-delete":
+            if data is None:
+                self._send(400, "text/plain", "Record not found.")
+                return
+            try:
+                ts = int(data.get("ts"))
+            except (TypeError, ValueError):
+                self._send(400, "text/plain", "Record not found.")
+                return
+            kind = str(data.get("kind") or "")
+            text = data.get("text") or ""
+            if kind.lower() == "note":
+                kind = "note"
+                text = " ".join(str(text).split())[:120]
+            for i, row in enumerate(MAINT):
+                if row[0] == ts and row[1] == kind and (row[2] or "") == text:
+                    del MAINT[i]
+                    MAINT_REV += 1
+                    self._send(200, "application/json", json.dumps({"events": MAINT}))
+                    return
+            self._send(400, "text/plain", "Record not found.")
             return
         if path == "/api/sensor":
             SENSOR_AT = int(time.time())
@@ -291,10 +376,16 @@ class Handler(BaseHTTPRequestHandler):
             MAINT_REV += 1
         elif path == "/api/purge-history":
             POINTS = []
+            PAUSES = []
+            SAMPLE_PAUSE = None
+            PAUSE_SINCE = 0
         elif path == "/api/purge-all":
             MAINT[:] = []
             MAINT_REV += 1
             POINTS = []
+            PAUSES = []
+            SAMPLE_PAUSE = None
+            PAUSE_SINCE = 0
         self._send(200, "application/json", json.dumps(status_body()))
 
 
@@ -323,11 +414,12 @@ def status_body():
     last = POINTS[-1] if POINTS else (now, 23.0, 55.0, 0)
     temp_avg, hum_avg = averages()
     segs = "0" * 16 + "1" * 12 + "0" * 20
+    held = bool(RECORDING and HUMIDITY_LIMIT) and last[2] <= HUMIDITY_LIMIT
     return {
         "fan_on": False,
-        "mode": "Idle",
+        "mode": "Humidity hold" if held else "Idle",
         "remaining_s": 0,
-        "next_run_s": 2 * 3600 + 15 * 60,
+        "next_run_s": None if held else 2 * 3600 + 15 * 60,
         "manual_min": 5,
         "segments": segs,
         "weekdays": "1111111",
@@ -340,6 +432,10 @@ def status_body():
         "sensor_error": None,
         "sensor_at": SENSOR_AT,
         "sensor_interval_min": 15,
+        "record": 0 if not RECORDING else 1,
+        "humidity_limit": HUMIDITY_LIMIT,
+        "humidity_gate": HUMIDITY_GATE,
+        "humidity_hold": held,
         "categories": CATEGORIES,
         "log_keep": 100,
         "time_synced": True,
@@ -363,7 +459,8 @@ def history_body(qs):
     if days not in (1, 3, 7, 30):
         days = 7
     now = int(time.time())
-    window = [p for p in POINTS if p[0] >= now - days * DAY]
+    cutoff = now - days * DAY
+    window = [p for p in POINTS if p[0] >= cutoff]
     if "page" in qs:
         try:
             page = max(0, int(qs.get("page", "0")))
@@ -383,9 +480,16 @@ def history_body(qs):
         pts = pts[::step]
     fan = None
     if days <= 7:
-        cutoff = now - days * DAY
         fan = [r for r in FANS if r[1] >= cutoff]
-    return {"days": days, "count": len(window), "points": [list(p) for p in pts], "fan": fan}
+    pauses = []
+    if SAMPLE_PAUSE and SAMPLE_PAUSE[1] > cutoff:
+        pauses.append([max(SAMPLE_PAUSE[0], cutoff), min(SAMPLE_PAUSE[1], now)])
+    for start, end in PAUSES:
+        if end > cutoff:
+            pauses.append([max(start, cutoff), end])
+    if not RECORDING and PAUSE_SINCE:
+        pauses.append([max(PAUSE_SINCE, cutoff), now])
+    return {"days": days, "count": len(window), "points": [list(p) for p in pts], "fan": fan, "pauses": pauses}
 
 
 def log_text():

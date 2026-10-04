@@ -58,6 +58,8 @@ N_SLOTS = 48
 MEM_LOG_MS = 60 * MINUTE
 MAINT_KEEP_S = 30 * DAY_S
 MAINT_MAX = 100
+PAUSE_KEEP_S = 30 * DAY_S
+PAUSE_MAX = 40
 # Maintenance buttons. Note is always available and is not part of this list.
 DEFAULT_CATEGORIES = ("Mist", "Feed", "Soil", "Deco")
 MAX_CATEGORIES = 8
@@ -86,6 +88,7 @@ LOG_FILE = "events.log"
 HISTORY_FILE = "climate.hist"
 FAN_HISTORY_FILE = "fan.hist"
 MAINT_FILE = "maintenance.hist"
+PAUSE_FILE = "pause.hist"
 PAGE_FILE = "index.html"
 PAGE_GZ = "index.html.gz"
 
@@ -170,6 +173,16 @@ fan_run_manual = 0
 fan_file_lines = 0
 # Maintenance: (device UTC seconds, kind, note text), oldest first
 maintenance = []
+# False while Advanced has paused temperature, humidity, and fan history.
+recording = True
+pause_since = 0  # device UTC seconds the open pause started; 0 when recording
+# Closed pauses: (start, end) device UTC seconds. The chart draws these gray.
+pauses = []
+# Scheduled fan stops at or below humidity_limit and stays off until humidity
+# rises above the limit plus the gate. 0 means the limit is off.
+humidity_limit = 0
+humidity_gate = 5
+humidity_hold = False
 mem_logged_at = 0
 
 
@@ -518,6 +531,7 @@ def purge_log():
 
 def load_settings():
   global sensor_interval_ms, log_keep, maint_categories, settings_timezone, settings_tz_rejected
+  global recording, pause_since
   cfg = read_cfg(SETTINGS_CFG)
   # sensor_interval_s from older builds is ignored so a saved 10 seconds becomes 15 minutes
   interval = cfg_int(cfg, "sensor_interval_min", MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN,
@@ -531,19 +545,77 @@ def load_settings():
   name = cfg.get("timezone", "").strip()
   settings_tz_rejected = name if name and name not in ZONES else ""
   settings_timezone = "" if settings_tz_rejected else name
+  recording = cfg_int(cfg, "record", 0, 1, 1) == 1
+  pause_since = 0
+  if not recording:
+    try:
+      pause_since = int(cfg.get("pause_since", "0") or "0")
+    except ValueError:
+      pause_since = 0
+    if pause_since < 0:
+      pause_since = 0
 
 
-def save_settings(interval, keep, zone, categories):
+def write_settings_file():
+  parts = [
+    "sensor_interval_min=%d" % (sensor_interval_ms // MINUTE),
+    "log_keep=%d" % log_keep,
+  ]
+  if settings_timezone:
+    parts.append("timezone=%s" % settings_timezone)
+  parts.append("maint_categories=%s" % ", ".join(maint_categories))
+  parts.append("record=%d" % (1 if recording else 0))
+  if not recording and pause_since:
+    parts.append("pause_since=%d" % pause_since)
+  with open(SETTINGS_CFG, "w") as f:
+    f.write("\n".join(parts) + "\n")
+
+
+def apply_recording(on):
+  # Open or close the chart pause. An open pause stays in settings across reboots.
+  global recording, pause_since
+  on = bool(on)
+  now_ts = utime.time()
+  if on:
+    if not recording and pause_since and time_synced and pause_since < now_ts:
+      pauses.append((pause_since, now_ts))
+      trim_rows(pauses, 1, now_ts - PAUSE_KEEP_S, PAUSE_MAX)
+      rewrite_pauses_file()
+      log("Recording resumed.")
+    pause_since = 0
+    recording = True
+    return
+  if recording and time_synced and fan_run_start is not None:
+    close_fan_run(now_ts)
+  if recording:
+    log("Recording paused.")
+  recording = False
+  if not pause_since and time_synced:
+    pause_since = now_ts
+
+
+def ensure_pause_open():
+  # A pause that started before the clock synced gets its start time on the first sync.
+  global pause_since
+  if recording or pause_since or not time_synced:
+    return
+  pause_since = utime.time()
+  try:
+    write_settings_file()
+  except OSError:
+    pass
+
+
+def save_settings(interval, keep, zone, categories, record):
   global sensor_interval_ms, log_keep, sensor_due_at, maint_categories
   check_range(interval, MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN, "Sensor interval (minutes)")
   check_range(keep, MIN_LOG_KEEP, MAX_LOG_KEEP, "Log lines kept")
+  check_range(int(record), 0, 1, "Recording")
   zone = str(zone).strip()
   if zone not in ZONES:
     raise ValueError("Unknown timezone.")
   names = parse_categories(categories)
-  with open(SETTINGS_CFG, "w") as f:
-    f.write("sensor_interval_min=%d\nlog_keep=%d\ntimezone=%s\nmaint_categories=%s\n" % (
-      interval, keep, zone, ", ".join(names)))
+  apply_recording(int(record) != 0)
   sensor_interval_ms = interval * MINUTE
   sensor_due_at = None  # read now; the next one follows the new interval
   log_keep = keep
@@ -551,16 +623,19 @@ def save_settings(interval, keep, zone, categories):
   rewrite_log_file()
   maint_categories = names
   apply_settings_zone(zone)
-  log("Settings changed: sensor every %d min, keep %d log lines, %d maintenance categories." % (
-    interval, keep, len(names)))
+  write_settings_file()
+  log("Settings changed: sensor every %d min, keep %d log lines, %d maintenance categories%s." % (
+    interval, keep, len(names), "" if recording else ", recording paused"))
 
 
 # ---------------------------------------------------------------- schedule
 
 def load_schedule():
-  global manual_ms
+  global manual_ms, humidity_limit, humidity_gate
   cfg = read_cfg(SCHEDULE_CFG)
   manual_ms = cfg_int(cfg, "manual_min", 1, MAX_MANUAL_MIN, DEFAULT_MANUAL_MIN) * MINUTE
+  humidity_limit = cfg_int(cfg, "humidity_limit", 0, 100, 0)
+  humidity_gate = cfg_int(cfg, "humidity_gate", 1, 20, 5)
   # A missing line (including an old period/duration file) keeps the default:
   # 08:00-14:00, every day.
   for key, bits in (("segments", segments), ("weekdays", weekdays)):
@@ -569,16 +644,21 @@ def load_schedule():
       set_bits(bits, text)
 
 
-def save_schedule(text, manual, days):
-  global manual_ms, suppressed_until
+def save_schedule(text, manual, days, limit, gate):
+  global manual_ms, suppressed_until, humidity_limit, humidity_gate
   if not is_bits(text, N_SLOTS):
     raise ValueError("Schedule must be 48 half-hour segments of 0 or 1.")
   if not is_bits(days, 7):
     raise ValueError("Weekdays must be 7 values of 0 or 1, Monday first.")
   check_range(manual, 1, MAX_MANUAL_MIN, "On-demand run (minutes)")
+  check_range(limit, 0, 100, "Humidity limit")
+  check_range(gate, 1, 20, "Humidity gate")
   with open(SCHEDULE_CFG, "w") as f:
-    f.write("manual_min=%d\nsegments=%s\nweekdays=%s\n" % (manual, text, days))
+    f.write("manual_min=%d\nsegments=%s\nweekdays=%s\nhumidity_limit=%d\nhumidity_gate=%d\n" % (
+      manual, text, days, limit, gate))
   manual_ms = manual * MINUTE
+  humidity_limit = limit
+  humidity_gate = gate
   set_bits(segments, text)
   set_bits(weekdays, days)
   suppressed_until = 0
@@ -642,7 +722,10 @@ def schedule_summary():
 
 
 def schedule_text():
-  return "%s | on-demand run: %s" % (schedule_summary(), fmt_duration(manual_ms))
+  text = "%s | on-demand run: %s" % (schedule_summary(), fmt_duration(manual_ms))
+  if humidity_limit:
+    text += " | humidity <= %d%%, resume above %d%%" % (humidity_limit, humidity_limit + humidity_gate)
+  return text
 
 
 def schedule_enabled():
@@ -699,15 +782,35 @@ def next_run_delay_s():
   return None
 
 
+def update_humidity_hold():
+  # Stop a scheduled run at the limit. Leave it stopped until humidity clears the gate.
+  # On-demand runs do not call this. A missing sensor keeps the previous hold.
+  global humidity_hold
+  if not recording or humidity_limit <= 0:
+    humidity_hold = False
+    return False
+  if humidity is None or not sensor_ok:
+    return humidity_hold
+  if humidity_hold:
+    if humidity > humidity_limit + humidity_gate:
+      humidity_hold = False
+      log("Humidity hold ended: %.1f%%." % humidity)
+  elif humidity <= humidity_limit:
+    humidity_hold = True
+    log("Humidity hold: %.1f%% at or below %d%%." % (humidity, humidity_limit))
+  return humidity_hold
+
+
 def schedule_state():
   # Return (schedule_running, in_selected_slot, seconds_left_in_stretch).
+  held = update_humidity_hold()
   if not schedule_enabled():
     return False, False, 0
   now_ts, local, idx, sec_into = local_parts()
   weekday = local_weekday(local)
   if not slot_selected(idx, weekday):
     return False, False, 0
-  if suppressed_until and now_ts < suppressed_until:
+  if (suppressed_until and now_ts < suppressed_until) or held:
     return False, True, 0
   return True, True, stretch_remaining_s(idx, sec_into, weekday)
 
@@ -757,7 +860,7 @@ def storage_usage():
 
 
 def status(now):
-  sched_running, _, sched_left = schedule_state()
+  sched_running, in_slot, sched_left = schedule_state()
   manual_left = 0
   if manual_running:
     manual_left = max(0, (manual_ms - utime.ticks_diff(now, manual_start)) // SECOND)
@@ -765,6 +868,8 @@ def status(now):
     mode = "Scheduled run"
   elif manual_running:
     mode = "On-demand run"
+  elif in_slot and humidity_hold:
+    mode = "Humidity hold"
   elif not time_synced:
     mode = "Waiting for clock"
   elif not schedule_enabled():
@@ -790,6 +895,10 @@ def status(now):
     "sensor_error": sensor_error,
     "sensor_at": None if sensor_at is None else sensor_at + EPOCH_OFFSET_S,
     "sensor_interval_min": sensor_interval_ms // MINUTE,
+    "record": 1 if recording else 0,
+    "humidity_limit": humidity_limit,
+    "humidity_gate": humidity_gate,
+    "humidity_hold": bool(in_slot and humidity_hold),
     "categories": maint_categories,
     "log_keep": log_keep,
     "log_count": len(log_lines),
@@ -885,7 +994,7 @@ def load_history():
 def store_history_sample(t, h):
   # Store one raw reading, then fold anything that has aged into a coarser tier.
   global history_stored_at
-  if not time_synced:
+  if not recording or not time_synced:
     return
   now_ts = utime.time()
   gap = sensor_interval_ms // SECOND
@@ -945,7 +1054,13 @@ def close_fan_run(now_ts):
 
 def track_fan_run(fan_active, manual):
   # Record fan on/off periods. Schedule (manual=0) replaces on-demand mid-run.
+  # A pause closes the open run and does not start another, so the hatch ends
+  # where the gray band starts. The fan itself still follows the schedule.
   global fan_run_start, fan_run_manual
+  if not recording:
+    if fan_run_start is not None and time_synced:
+      close_fan_run(utime.time())
+    return
   kind = 1 if manual else 0
   if fan_active and time_synced:
     if fan_run_start is None:
@@ -962,6 +1077,53 @@ def track_fan_run(fan_active, manual):
 
 def point_json(p):
   return [p[0] + EPOCH_OFFSET_S, p[1] / 10, p[2] / 10, p[3]]
+
+
+def rewrite_pauses_file():
+  write_lines(PAUSE_FILE, ("%d,%d" % row for row in pauses))
+
+
+def load_pauses():
+  now_ts = utime.time()
+  cutoff = now_ts - PAUSE_KEEP_S
+  pauses[:] = []
+  for line in read_lines(PAUSE_FILE):
+    parts = line.split(",")
+    if len(parts) < 2:
+      continue
+    try:
+      start = int(parts[0])
+      end = int(parts[1])
+    except ValueError:
+      continue
+    if end <= start or end < cutoff:
+      continue
+    pauses.append((start, end))
+    if len(pauses) > PAUSE_MAX:
+      pauses.pop(0)
+  trim_rows(pauses, 1, cutoff, PAUSE_MAX)
+  rewrite_pauses_file()
+
+
+def clear_pauses():
+  pauses[:] = []
+  rewrite_pauses_file()
+
+
+def pause_spans(cutoff, now_ts):
+  # Closed pauses plus the open one, clipped to the chart window.
+  spans = []
+  for start, end in pauses:
+    if end <= cutoff:
+      continue
+    start = cutoff if start < cutoff else start
+    if end > start:
+      spans.append((start, end))
+  if not recording and pause_since:
+    start = cutoff if pause_since < cutoff else pause_since
+    if now_ts > start:
+      spans.append((start, now_ts))
+  return spans
 
 
 def history_json(days, page):
@@ -988,7 +1150,20 @@ def history_json(days, page):
     if fan_run_start is not None:
       runs.append((fan_run_start, now_ts, fan_run_manual))
     fan = [[s + EPOCH_OFFSET_S, e + EPOCH_OFFSET_S, m] for s, e, m in runs]
-  return {"days": days, "count": total, "points": [point_json(p) for p in pts], "fan": fan}
+  spans = [[s + EPOCH_OFFSET_S, e + EPOCH_OFFSET_S] for s, e in pause_spans(cutoff, now_ts)]
+  return {"days": days, "count": total, "points": [point_json(p) for p in pts], "fan": fan, "pauses": spans}
+
+
+def delete_history_point(unix_ts):
+  global history_stored_at
+  device_ts = int(unix_ts) - EPOCH_OFFSET_S
+  kept = [p for p in history if p[0] != device_ts]
+  if len(kept) == len(history):
+    raise ValueError("Sample not found.")
+  history[:] = kept
+  if not history or history_stored_at == device_ts:
+    history_stored_at = history[-1][0] if history else 0
+  rewrite_history_file()
 
 
 def purge_history():
@@ -998,6 +1173,7 @@ def purge_history():
   history_stored_at = 0
   if fan_run_start is not None:
     fan_run_start = utime.time()
+  clear_pauses()
   rewrite_history_file()
   rewrite_fan_runs_file()
   log("Climate history purged.")
@@ -1014,6 +1190,7 @@ def purge_all():
   maintenance[:] = []
   maint_rev += 1
   log_lines[:] = []
+  clear_pauses()
   rewrite_history_file()
   rewrite_fan_runs_file()
   rewrite_maintenance_file()
@@ -1077,6 +1254,25 @@ def maintenance_json():
   return {"events": events}
 
 
+def delete_maintenance(unix_ts, kind, text):
+  global maint_rev
+  device_ts = int(unix_ts) - EPOCH_OFFSET_S
+  stored = match_category(kind)
+  if stored is None:
+    raise ValueError("Unknown maintenance kind.")
+  note = ""
+  if stored == "note":
+    note = " ".join(str(text).split())[:NOTE_MAX]
+  for i in range(len(maintenance) - 1, -1, -1):
+    row = maintenance[i]
+    if row[0] == device_ts and row[1] == stored and row[2] == note:
+      del maintenance[i]
+      rewrite_maintenance_file()
+      maint_rev += 1
+      return
+  raise ValueError("Record not found.")
+
+
 def purge_maintenance():
   global maint_rev
   maintenance[:] = []
@@ -1129,7 +1325,8 @@ def sensor_measure(now):
 
 def sensor_poll(now):
   # Read the AM2302 every sensor_interval_ms, retrying sooner after a failure.
-  if dht is None:
+  # Paused recording leaves the sensor alone so a removed probe does not fill the log.
+  if not recording or dht is None:
     return
   if sensor_due_at is not None and utime.ticks_diff(now, sensor_due_at) < 0:
     return
@@ -1409,12 +1606,14 @@ def send_download(conn, which):
     send_sections(conn, download_filename("climate.txt"), (
       (HISTORY_FILE, HISTORY_FILE),
       (FAN_HISTORY_FILE, FAN_HISTORY_FILE),
+      (PAUSE_FILE, PAUSE_FILE),
     ))
   elif which == "all":
     send_sections(conn, download_filename("terrarium.txt"), (
       (LOG_FILE, LOG_FILE),
       (HISTORY_FILE, HISTORY_FILE),
       (FAN_HISTORY_FILE, FAN_HISTORY_FILE),
+      (PAUSE_FILE, PAUSE_FILE),
       (MAINT_FILE, MAINT_FILE),
     ))
   else:
@@ -1475,12 +1674,24 @@ def api_button(data, now):
 
 
 def api_schedule(data, now):
-  save_schedule(str(data["segments"]), int(data["manual_min"]), str(data["weekdays"]))
+  save_schedule(str(data["segments"]), int(data["manual_min"]), str(data["weekdays"]),
+                int(data["humidity_limit"]), int(data["humidity_gate"]))
 
 
 def api_settings(data, now):
   save_settings(int(data["sensor_interval_min"]), int(data["log_keep"]),
-                str(data["timezone"]), str(data.get("maint_categories", "")))
+                str(data["timezone"]), str(data.get("maint_categories", "")),
+                int(data.get("record", 1)))
+
+
+def api_history_delete(data, now):
+  delete_history_point(int(data["ts"]))
+
+
+def api_maintenance_delete(data, now):
+  text = data.get("text")
+  delete_maintenance(int(data["ts"]), str(data["kind"]), "" if text is None else str(text))
+  return maintenance_json()
 
 
 def api_sensor(data, now):
@@ -1500,6 +1711,8 @@ POST_ROUTES = {
   "/api/settings": api_settings,
   "/api/maintenance": api_maintenance,
   "/api/sensor": api_sensor,
+  "/api/history-delete": api_history_delete,
+  "/api/maintenance-delete": api_maintenance_delete,
   "/api/purge-log": lambda data, now: purge_log(),
   "/api/purge-history": lambda data, now: purge_history(),
   "/api/purge-maintenance": lambda data, now: purge_maintenance(),
@@ -1594,7 +1807,8 @@ _cause = machine.reset_cause()
 log("Terrarium Climate Controller starting (ESP32-C3), reset cause: %s" % RESET_CAUSE_NAMES.get(_cause, _cause))
 log("Pins: fan=GPIO%d  button=GPIO%d  sensor=GPIO%d" % (FAN_GPIO, BTN_GPIO, DHT_GPIO))
 log("Schedule: %s" % schedule_text())
-log("Settings: sensor every %d min, keep %d log lines." % (sensor_interval_ms // MINUTE, log_keep))
+log("Settings: sensor every %d min, keep %d log lines%s." % (
+  sensor_interval_ms // MINUTE, log_keep, "" if recording else ", recording paused"))
 
 button_start()
 sensor_start()
@@ -1608,6 +1822,7 @@ utime.sleep_ms(STARTUP_DELAY_MS)
 load_history()
 load_fan_runs()
 load_maintenance()
+load_pauses()
 log_memory()
 mem_logged_at = utime.ticks_ms()
 log("Controller ready.")
@@ -1621,6 +1836,7 @@ def control_step(now):
   refresh_tz()
   wifi_poll(now)
   clock_poll(now)
+  ensure_pause_open()
   sensor_poll(now)
   if utime.ticks_diff(now, mem_logged_at) >= MEM_LOG_MS:
     log_memory()

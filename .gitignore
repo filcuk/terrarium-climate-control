@@ -7,4 +7,5 @@ fan.hist
 maintenance.hist
 /device
 /__pycache__
+/.venv
 /dist

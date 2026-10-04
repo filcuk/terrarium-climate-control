@@ -69,13 +69,15 @@ canvas{width:100%;height:220px;display:block;background:#fafcfa;border-radius:10
 .avg-tip{margin-left:auto;color:#888;font-size:.78em;white-space:nowrap}
 .row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0}
 input{padding:8px;font-size:1em;border:1px solid #ccc;border-radius:8px;width:100px}
+input[type=checkbox]{width:auto;padding:0;accent-color:#2d6a4f}
 input.wide{width:100%;max-width:420px}
 pre{background:#111;color:#cfe8cf;padding:12px;border-radius:10px;max-height:360px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:0}
-.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:8px}
+.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+.field-note{margin:2px 0 0;line-height:1.4}
 .days{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
 .day{height:32px;padding:0;border-radius:4px;background:#e4ece4;color:#1b1f1b;font-size:.72em}
 .day.on{background:#2d6a4f;color:#fff}
-.hours{display:grid;grid-template-columns:repeat(12,1fr);font-size:.72em;color:#666;margin-top:10px}
+.hours{display:grid;grid-template-columns:repeat(12,1fr);font-size:.72em;color:#666;margin:10px 0 6px}
 .slots{display:grid;grid-template-columns:repeat(24,1fr);gap:3px}
 .slot{height:32px;padding:0;border-radius:4px;background:#e4ece4}
 .slot.on{background:#2d6a4f}
@@ -83,11 +85,16 @@ pre{background:#111;color:#cfe8cf;padding:12px;border-radius:10px;max-height:360
 .slot.on.now{box-shadow:inset 0 0 0 2px #fff}
 table{width:100%;border-collapse:collapse;font-size:.9em;margin-top:8px}
 th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
+th.del,td.del{text-align:right;width:1%;white-space:nowrap}
+button.x{background:none;color:#888;padding:0 4px;min-width:1.5em;font-size:1.15em;font-weight:700;line-height:1}
+button.x:hover{background:none;color:#c0392b}
 .pager{display:flex;gap:8px;align-items:center;margin-top:8px}
 .maint-list{margin-top:14px}
-.maint-list div{padding:6px 0;border-bottom:1px solid #e4ece4}
+.maint-list div{display:flex;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid #e4ece4}
+.maint-list div:last-child{border-bottom:0}
+.maint-main{flex:1;min-width:0;overflow-wrap:anywhere}
 .maint-kind{font-weight:700}
-.maint-date{color:#999}
+.maint-date{color:#999;margin-left:auto;white-space:nowrap;text-align:right}
 .note-row{display:flex;gap:8px;flex:1 1 320px;min-width:min(100%,320px)}
 .note-row input{width:auto;flex:1;min-width:200px}
 .sheet{position:fixed;inset:0;z-index:5;display:flex;align-items:center;justify-content:center;padding:16px}
@@ -95,6 +102,7 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
 .sheet-bg{position:absolute;inset:0;background:rgba(27,31,27,.4)}
 .sheet-panel{position:relative;background:#fff;border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:8px;min-width:220px;box-shadow:0 8px 24px rgba(0,0,0,.18)}
 .sheet-panel button{width:100%}
+.sheet-note{margin:0 0 4px;line-height:1.4;max-width:360px;overflow-wrap:anywhere}
 </style></head><body>
 <svg class="icon-sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
   <symbol id="touch-app" viewBox="0 0 24 24">
@@ -145,17 +153,18 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
   <div class="legend"><span><span class="swatch" style="background:#b35c00"></span>Temp °C</span>
   <span><span class="swatch" style="background:#1d4e89"></span>Humidity %RH</span>
   <span id="fanKey"><span class="swatch hatch"></span>Fan</span>
-  <span id="fanKeyOn"><span class="swatch hatch-x"></span>On-demand fan</span></div>
+  <span id="fanKeyOn"><span class="swatch hatch-x"></span>On-demand fan</span>
+  <span id="pauseKey" style="display:none"><span class="swatch" style="background:#d5dbd5;border:1px solid #c5ccc5"></span>Paused</span></div>
   <div class="chart-wrap">
     <canvas id="chart"></canvas>
     <div id="tip" class="tip"></div>
   </div>
   <div class="chart-foot">
     <div id="chartNote" class="muted"></div>
-    <div class="avg-tip">After 1 day: &#216; 1h, 4h, then 12h &#183; Fan 7d</div>
+    <div class="avg-tip">After 1 day: &#216; 1h &#183; 3 days: 4h &#183; 7 days: 12h &#183; Fan 7d</div>
   </div>
   <div id="samples" style="display:none">
-    <table><thead><tr><th>Time</th><th>Temperature</th><th>Humidity</th></tr></thead><tbody id="sampleRows"></tbody></table>
+    <table><thead><tr><th>Time</th><th>Temperature</th><th>Humidity</th><th class="del"></th></tr></thead><tbody id="sampleRows"></tbody></table>
     <div class="pager">
       <button type="button" class="secondary" id="samplePrev" onclick="sampleStep(-1)">Newer</button>
       <span id="samplePage" class="muted"></span>
@@ -184,12 +193,18 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
 </div>
 
 <div class="card">
-  <h2>Ventilation Schedule</h2>
+  <h2>Ventilation</h2>
   <div id="days" class="days"></div>
   <div id="slots"></div>
   <form onsubmit="event.preventDefault(); saveSchedule();">
     <div class="row"><label for="man">On-demand run (minutes)</label><input id="man" type="number" min="1" required></div>
-    <button>Save</button> <span id="schedMsg" class="muted"></span>
+    <div class="row"><label for="hlim">Humidity limit (%)</label><input id="hlim" type="number" min="0" max="100" required></div>
+    <div class="row"><label for="hgate">Humidity gate (%)</label><input id="hgate" type="number" min="1" max="20" required></div>
+    <p class="muted field-note">Scheduled runs stop at or below the limit and resume above the limit plus the gate. 0 turns the limit off. On-demand runs ignore it.</p>
+    <div class="actions">
+      <button>Save</button>
+      <span id="schedMsg" class="muted"></span>
+    </div>
   </form>
 </div>
 
@@ -200,6 +215,7 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
     <div class="row"><label for="lkeep">Log lines to keep</label><input id="lkeep" type="number" min="20" max="250" required></div>
     <div class="row"><label for="tzName">Timezone</label><input id="tzName" class="wide" type="text" autocomplete="off" spellcheck="false" required></div>
     <div class="row"><label for="cats">Maintenance categories</label><input id="cats" class="wide" type="text" maxlength="220" autocomplete="off"></div>
+    <div class="row"><label for="pauseRec">Pause recording</label><input id="pauseRec" type="checkbox"></div>
     <div class="actions">
       <button>Save</button>
       <button type="button" class="secondary" onclick="openSheet('download')">Download</button>
@@ -222,7 +238,7 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid #e4ece4}
 <script>
 const $ = id => document.getElementById(id);
 const NL = String.fromCharCode(10);
-let formLoaded = false, chartDays = 7, chartPoints = [], chartFan = [], chartGeom = null;
+let formLoaded = false, chartDays = 7, chartPoints = [], chartFan = [], chartPauses = [], chartGeom = null;
 let patterns = {}, tipPinned = false, samplesOpen = false, samplePage = 0, sampleTotal = 0;
 let maintEvents = [], maintPage = 0, logKey = '', maintKey = '', catKey = '', reading = false;
 const PAGE_SIZE = 50, MAINT_PAGE = 5;
@@ -315,6 +331,18 @@ function axisText(ts, step, span) {
   if (span > 36 * 3600) return d.toLocaleString([], {month:'short', day:'numeric'}) + ' ' + time;
   return time;
 }
+function hourStart(ts) {
+  const d = new Date(ts * 1000);
+  d.setMinutes(0, 0, 0);
+  return d.getTime() / 1000;
+}
+function hourEnd(ts) {
+  const d = new Date(ts * 1000);
+  if (d.getMinutes() === 0 && d.getSeconds() === 0 && d.getMilliseconds() === 0) return ts;
+  d.setMinutes(0, 0, 0);
+  d.setHours(d.getHours() + 1);
+  return d.getTime() / 1000;
+}
 function drawChart() {
   const c = $('chart'), ctx = c.getContext('2d');
   const dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
@@ -324,23 +352,36 @@ function drawChart() {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#fafcfa'; ctx.fillRect(0, 0, W, H);
   const pts = chartPoints;
+  const pauses = chartPauses;
   chartGeom = null;
-  if (!pts.length) {
+  if (!pts.length && !pauses.length) {
     ctx.fillStyle = '#888'; ctx.font = '14px system-ui';
     ctx.fillText('No history yet. Samples are stored once the clock is synced.', pad.l, H / 2);
     return;
   }
   let tMin = Infinity, tMax = -Infinity, hMin = Infinity, hMax = -Infinity;
   pts.forEach(p => { tMin = Math.min(tMin, p[1]); tMax = Math.max(tMax, p[1]); hMin = Math.min(hMin, p[2]); hMax = Math.max(hMax, p[2]); });
+  if (!pts.length) { tMin = 15; tMax = 30; hMin = 0; hMax = 100; }
   if (tMax === tMin) { tMin -= 1; tMax += 1; }
   if (hMax === hMin) { hMin = Math.max(0, hMin - 5); hMax = Math.min(100, hMax + 5); }
   tMin = Math.floor(tMin) - 1; tMax = Math.ceil(tMax) + 1;
   hMin = Math.max(0, Math.floor(hMin) - 5); hMax = Math.min(100, Math.ceil(hMax) + 5);
-  const x0 = pts[0][0], x1 = Math.max(pts[pts.length - 1][0], x0 + 1);
+  let x0 = pts.length ? pts[0][0] : pauses[0][0];
+  let x1 = pts.length ? pts[pts.length - 1][0] : pauses[0][1];
+  pauses.forEach(g => { x0 = Math.min(x0, g[0]); x1 = Math.max(x1, g[1]); });
+  x0 = hourStart(x0);
+  x1 = hourEnd(x1);
+  if (x1 <= x0) x1 = x0 + 3600;
   const x = ts => pad.l + (ts - x0) / Math.max(1, x1 - x0) * (W - pad.l - pad.r);
   const yT = v => pad.t + (1 - (v - tMin) / (tMax - tMin)) * (H - pad.t - pad.b);
   const yH = v => pad.t + (1 - (v - hMin) / (hMax - hMin)) * (H - pad.t - pad.b);
   chartGeom = {x0, x1, pad, W, H, x, yT, yH, pts};
+  pauses.forEach(g => {
+    if (g[1] < x0 || g[0] > x1) return;
+    const a = x(Math.max(g[0], x0)), w = x(Math.min(g[1], x1)) - a;
+    ctx.fillStyle = '#d5dbd5';
+    ctx.fillRect(a, pad.t, Math.max(1, w), H - pad.t - pad.b);
+  });
   chartFan.forEach(r => {
     if (r[1] < x0 || r[0] > x1) return;
     const a = x(Math.max(r[0], x0)), w = x(Math.min(r[1], x1)) - a;
@@ -360,15 +401,24 @@ function drawChart() {
   ctx.fillText(hMax.toFixed(0) + '%', W - 4, pad.t + 4);
   ctx.fillText(hMin.toFixed(0) + '%', W - 4, H - pad.b);
   ctx.textAlign = 'left';
+  function bridged(prev, ts) {
+    return pauses.some(g => g[0] < ts && g[1] > prev);
+  }
   function line(color, yfn, idx) {
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
-    pts.forEach((p, i) => { const X = x(p[0]), Y = yfn(p[idx]); i ? ctx.lineTo(X, Y) : ctx.moveTo(X, Y); });
+    pts.forEach((p, i) => {
+      const X = x(p[0]), Y = yfn(p[idx]);
+      if (!i || bridged(pts[i - 1][0], p[0])) ctx.moveTo(X, Y);
+      else ctx.lineTo(X, Y);
+    });
     ctx.stroke();
   }
-  line('#1d4e89', yH, 2);
-  line('#b35c00', yT, 1);
+  if (pts.length) {
+    line('#1d4e89', yH, 2);
+    line('#b35c00', yT, 1);
+  }
   ctx.fillStyle = '#666';
-  const startLabel = clock(pts[0][0]), endLabel = clock(pts[pts.length - 1][0]);
+  const startLabel = clock(x0), endLabel = clock(x1);
   const gap = 16;
   const leftLimit = pad.l + ctx.measureText(startLabel).width + gap;
   const rightLimit = W - pad.r - ctx.measureText(endLabel).width - gap;
@@ -433,10 +483,13 @@ async function loadHistory() {
     chartPoints = h.points || [];
     const showFan = chartDays <= 7;
     chartFan = showFan && h.fan ? h.fan : [];
+    chartPauses = h.pauses || [];
     $('fanKey').style.display = showFan ? '' : 'none';
     $('fanKeyOn').style.display = showFan ? '' : 'none';
+    $('pauseKey').style.display = chartPauses.length ? '' : 'none';
     const n = h.count || 0;
     const note = $('chartNote');
+    note.className = 'muted';
     note.textContent = '';
     if (n) {
       const a = document.createElement('a');
@@ -471,6 +524,10 @@ async function loadSamples() {
         td.textContent = text;
         tr.appendChild(td);
       });
+      const del = document.createElement('td');
+      del.className = 'del';
+      del.appendChild(deleteCross(() => confirmDelete(sampleLabel(p), () => removeSample(p))));
+      tr.appendChild(del);
       body.appendChild(tr);
     });
     const pages = Math.max(1, Math.ceil(sampleTotal / PAGE_SIZE));
@@ -520,6 +577,7 @@ function paintSub(el, parts) {
 }
 function fanLine(s) {
   if (s.fan_on) return s.mode + ' \u00b7 ' + fmt(s.remaining_s) + ' left';
+  if (s.mode === 'Humidity hold') return 'Humidity hold';
   if (!s.time_synced) return 'Waiting for clock';
   if (s.next_run_s !== null && s.next_run_s !== undefined) return 'Next scheduled run in ' + fmt(s.next_run_s);
   return 'Schedule off';
@@ -619,10 +677,13 @@ async function refresh() {
     $('humCard').disabled = reading;
     if (!formLoaded) {
       $('man').value = s.manual_min;
+      $('hlim').value = s.humidity_limit || 0;
+      $('hgate').value = s.humidity_gate || 5;
       $('sint').value = s.sensor_interval_min;
       $('lkeep').value = s.log_keep;
       $('tzName').value = s.timezone || '';
       $('cats').value = (s.categories || []).join(', ');
+      $('pauseRec').checked = s.record === 0;
       paintDays(s.weekdays || '');
       paintSlots(s.segments || '');
       formLoaded = true;
@@ -657,16 +718,20 @@ async function press() {
 }
 function maintRow(ev) {
   const row = document.createElement('div');
+  const main = document.createElement('span');
+  main.className = 'maint-main';
   const kind = document.createElement('span');
   kind.className = 'maint-kind';
   kind.textContent = ev[1] === 'note' ? 'Note' : ev[1];
-  row.appendChild(kind);
-  if (ev[1] === 'note' && ev[2]) row.appendChild(document.createTextNode(': ' + ev[2]));
+  main.appendChild(kind);
+  if (ev[1] === 'note' && ev[2]) main.appendChild(document.createTextNode(': ' + ev[2]));
+  main.appendChild(document.createTextNode(' \u00b7 ' + ago(ev[0])));
   const date = document.createElement('span');
   date.className = 'maint-date';
-  date.textContent = ' \u00b7 ' + clock(ev[0]);
-  row.appendChild(document.createTextNode(' \u00b7 ' + ago(ev[0])));
+  date.textContent = clock(ev[0]);
+  row.appendChild(main);
   row.appendChild(date);
+  row.appendChild(deleteCross(() => confirmDelete(maintLabel(ev), () => removeMaint(ev))));
   return row;
 }
 function renderMaint() {
@@ -770,12 +835,80 @@ async function submit(msgId, busy, done, url, data, after) {
 }
 function saveSchedule() {
   submit('schedMsg', 'Saving\u2026', 'Saved.', '/api/schedule', {
-    segments: bitString('#slots .slot'), weekdays: bitString('#days .day'), manual_min: +$('man').value});
+    segments: bitString('#slots .slot'), weekdays: bitString('#days .day'), manual_min: +$('man').value,
+    humidity_limit: +$('hlim').value, humidity_gate: +$('hgate').value});
 }
 function saveAdvanced() {
   submit('advMsg', 'Saving\u2026', 'Saved.', '/api/settings', {
     sensor_interval_min: +$('sint').value, log_keep: +$('lkeep').value,
-    timezone: $('tzName').value, maint_categories: $('cats').value}, loadHistory);
+    timezone: $('tzName').value, maint_categories: $('cats').value,
+    record: $('pauseRec').checked ? 0 : 1}, loadHistory);
+}
+function deleteCross(action) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'x';
+  b.setAttribute('aria-label', 'Delete');
+  b.textContent = '\u00d7';
+  b.onclick = action;
+  return b;
+}
+function sampleLabel(p) {
+  return clock(p[0]) + ' \u00b7 ' + mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C \u00b7 ' + mark(p) + Number(p[2]).toFixed(1) + '%';
+}
+function maintLabel(ev) {
+  const kind = ev[1] === 'note' ? 'Note' : ev[1];
+  const note = ev[1] === 'note' && ev[2] ? ': ' + ev[2] : '';
+  return kind + note + ' \u00b7 ' + clock(ev[0]);
+}
+function confirmDelete(message, action) {
+  const panel = $('sheetPanel');
+  panel.textContent = '';
+  const note = document.createElement('div');
+  note.className = 'sheet-note';
+  note.textContent = message;
+  panel.appendChild(note);
+  const yes = document.createElement('button');
+  yes.type = 'button';
+  yes.className = 'danger';
+  yes.textContent = 'Delete';
+  yes.onclick = () => { closeSheet(); action(); };
+  panel.appendChild(yes);
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'secondary';
+  cancel.textContent = 'Cancel';
+  cancel.onclick = closeSheet;
+  panel.appendChild(cancel);
+  $('sheet').hidden = false;
+}
+async function removeSample(p) {
+  try {
+    await post('/api/history-delete', {ts: p[0]});
+    if (samplePage > 0 && sampleTotal <= samplePage * PAGE_SIZE + 1) samplePage -= 1;
+    await loadHistory();
+    if (samplesOpen) await loadSamples();
+  } catch (e) {
+    const note = $('chartNote');
+    note.textContent = e.message;
+    note.className = 'err';
+  }
+}
+async function removeMaint(ev) {
+  const msg = $('maintMsg');
+  msg.textContent = '';
+  msg.className = 'muted';
+  try {
+    maintEvents = JSON.parse(await post('/api/maintenance-delete', {
+      ts: ev[0], kind: ev[1], text: ev[2] || ''})).events || [];
+    const pages = Math.ceil(maintEvents.length / MAINT_PAGE) || 1;
+    if (maintPage >= pages) maintPage = pages - 1;
+    renderMaint();
+    refresh();
+  } catch (e) {
+    msg.textContent = e.message;
+    msg.className = 'err';
+  }
 }
 function closeSheet() { $('sheet').hidden = true; }
 function openSheet(kind) {

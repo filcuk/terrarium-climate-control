@@ -11,7 +11,9 @@ controller on the device, which is what frees the memory Wi-Fi needs.
 mpy-cross must match the MicroPython version on the board. A mismatch makes
 the board raise: incompatible .mpy file
 
-    pip install mpy-cross
+    python -m venv .venv
+    # activate .venv, then:
+    python -m pip install -r requirements.txt
 
 Or set MPY_CROSS to the executable. This compile does not use native code,
 so no -march flag is required.
@@ -36,8 +38,10 @@ def find_mpy_cross():
         return found
     sys.exit(
         "mpy-cross was not found.\n"
-        "Install the build that matches the MicroPython version on the ESP32-C3:\n"
-        "  pip install mpy-cross\n"
+        "Install the build that matches the MicroPython version on the ESP32-C3\n"
+        "into this folder's virtual environment:\n"
+        "  python -m venv .venv\n"
+        "  activate .venv, then: python -m pip install -r requirements.txt\n"
         "Or set MPY_CROSS to the executable path.\n"
         "A mismatched version makes the board raise: incompatible .mpy file"
     )
