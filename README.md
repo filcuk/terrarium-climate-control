@@ -66,6 +66,8 @@ python build.py
   mpremote connect auto cp dist/terrarium.mpy :terrarium.mpy
   mpremote connect auto cp dist/index.html :index.html
   mpremote connect auto cp dist/index.html.gz :index.html.gz
+  mpremote connect auto cp dist/icon.webp :icon.webp
+  mpremote connect auto cp dist/favicon.ico :favicon.ico
   mpremote connect auto cp wifi.cfg :wifi.cfg
   mpremote connect auto reset
   ```
@@ -112,6 +114,8 @@ Explanations in `main.py` are `#` comments. A docstring is kept in memory for th
 | `terrarium.mpy` | yes           | Compiled controller, written to `dist/` by `python build.py`. Copy this to the board next to the launcher. |
 | `index.html`   | yes            | The web page, streamed from flash.                                                                                     |
 | `index.html.gz` | yes           | Compressed copy of the page. `build.py` refreshes it. Served instead of `index.html` unless `index.html` is newer. |
+| `icon.webp`    | yes            | Brand mark next to the site title. Copied from `res/` by `build.py`. |
+| `favicon.ico`  | yes            | Browser tab icon. Generated from `res/icon.png`; copied by `build.py`. |
 | `wifi.cfg`     | yes            | WiFi credentials. Copy `wifi.cfg.example`, fill it in, and save it on the board as `wifi.cfg`.                         |
 | `schedule.cfg` | no             | Created when you save Ventilation from the web page. |
 | `settings.cfg` | no             | Sensor interval, log size, timezone, maintenance categories, recording pause, and daily reset. |

@@ -97,6 +97,13 @@ MAINT_FILE = "maintenance.hist"
 PAUSE_FILE = "pause.hist"
 PAGE_FILE = "index.html"
 PAGE_GZ = "index.html.gz"
+ICON_WEBP = "icon.webp"
+FAVICON_ICO = "favicon.ico"
+# Path -> (flash file, content type)
+STATIC_FILES = {
+  "/icon.webp": (ICON_WEBP, "image/webp"),
+  "/favicon.ico": (FAVICON_ICO, "image/x-icon"),
+}
 
 WEB_PORT = 80
 DEFAULT_HOSTNAME = "terrarium"  # reachable as http://terrarium.local/; override with hostname= in wifi.cfg
@@ -1892,6 +1899,15 @@ def file_size_mtime(path):
   return st[6], st[8]
 
 
+def send_static(conn, path, content_type):
+  info = file_size_mtime(path)
+  if not info:
+    send(conn, "404 Not Found", "text/plain", "%s is missing." % path)
+    return
+  send_head(conn, "200 OK", content_type, info[0])
+  stream_file(conn, path)
+
+
 def send_page(conn):
   # Stream the page from flash. The gzipped copy is used unless index.html is newer.
   plain = file_size_mtime(PAGE_FILE)
@@ -1904,13 +1920,7 @@ def send_page(conn):
     send(conn, "404 Not Found", "text/plain", "%s is missing. Copy it to the board next to main.py." % PAGE_FILE)
     return
   send_head(conn, "200 OK", "text/html; charset=utf-8", size, extra)
-  view = memoryview(send_buf)
-  with open(path, "rb") as f:
-    while True:
-      n = f.readinto(send_buf)
-      if not n:
-        break
-      conn.sendall(view[:n])
+  stream_file(conn, path)
 
 
 def stream_file(conn, path):
@@ -2094,6 +2104,8 @@ def handle(conn, method, path, qs, body, ctype, now):
   if method == "GET":
     if path == "/":
       send_page(conn)
+    elif path in STATIC_FILES:
+      send_static(conn, STATIC_FILES[path][0], STATIC_FILES[path][1])
     elif path == "/api/status":
       send_json(conn, status(now))
     elif path == "/api/logs":

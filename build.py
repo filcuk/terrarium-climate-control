@@ -3,7 +3,7 @@
     python build.py
 
 Writes dist/main.py (a short launcher), dist/terrarium.mpy (the compiled
-controller), dist/index.html, and dist/index.html.gz.
+controller), dist/index.html, dist/index.html.gz, and the site icons.
 
 The board runs main.py only. Importing terrarium.mpy skips compiling the
 controller on the device, which is what frees the memory Wi-Fi needs.
@@ -58,6 +58,11 @@ def main():
     packed = gzip.compress(html, compresslevel=9)
     (DIST / "index.html.gz").write_bytes(packed)
     (ROOT / "index.html.gz").write_bytes(packed)
+    for name in ("icon.webp", "favicon.ico"):
+        src = ROOT / "res" / name
+        if not src.is_file():
+            sys.exit("Missing %s" % src)
+        shutil.copy2(src, DIST / name)
     print("Wrote %s" % DIST)
 
 

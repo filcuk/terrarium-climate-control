@@ -252,6 +252,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             self._send(200, "text/html; charset=utf-8", page_html())
             return
+        if path == "/icon.webp":
+            data = (ROOT / "res" / "icon.webp").read_bytes()
+            self._send(200, "image/webp", data)
+            return
+        if path == "/favicon.ico":
+            data = (ROOT / "res" / "favicon.ico").read_bytes()
+            self._send(200, "image/x-icon", data)
+            return
         if path == "/api/status":
             self._send(200, "application/json", json.dumps(status_body()))
             return
