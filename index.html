@@ -253,6 +253,8 @@ let patterns = {}, tipPinned = false, samplesOpen = false, samplePage = 0, sampl
 let maintEvents = [], maintPage = 0, logKey = '', maintKey = '', catKey = '', reading = false;
 const PAGE_SIZE = 50, MAINT_PAGE = 5;
 const SAMPLE_CLIMATE = 1, SAMPLE_FAN_EDGE = 2;
+const phoneMq = window.matchMedia('(max-width: 640px)');
+function isPhoneView() { return phoneMq.matches; }
 function hatchPattern(ctx, cross) {
   const key = cross ? 'x' : 's';
   if (patterns[key]) return patterns[key];
@@ -489,6 +491,8 @@ function hideTip() {
   $('tip').style.display = 'none';
 }
 async function loadHistory() {
+  // Chart card is hidden on phone; skip the heavy history fetch/draw.
+  if (isPhoneView()) return;
   try {
     const h = JSON.parse(await req('/api/history?days=' + chartDays));
     chartPoints = h.points || [];
@@ -540,6 +544,7 @@ function sampleFanText(p) {
   return p[4] ? 'On' : 'Off';
 }
 async function loadSamples() {
+  if (isPhoneView()) return;
   try {
     const h = JSON.parse(await req('/api/history?days=' + chartDays + '&page=' + samplePage));
     sampleTotal = h.total || 0;
@@ -722,8 +727,7 @@ async function refresh() {
     }
     markNow(s.time);
     const lk = s.boot + ':' + s.log_rev;
-    const hideLog = window.matchMedia('(max-width: 640px)').matches;
-    if (!hideLog && lk !== logKey) {
+    if (!isPhoneView() && lk !== logKey) {
       const logs = await req('/api/logs');
       $('log').textContent = logs.trim() ? logs.trim().split(NL).reverse().join(NL) : 'No log entries yet.';
       logKey = lk;
@@ -1028,10 +1032,15 @@ chartEl.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse' &&
 addEventListener('pointerdown', e => {
   if (tipPinned && e.target !== chartEl) hideTip();
 });
+function onPhoneMqChange() {
+  if (!isPhoneView()) loadHistory();
+}
+if (phoneMq.addEventListener) phoneMq.addEventListener('change', onPhoneMqChange);
+else phoneMq.addListener(onPhoneMqChange);
 refresh();
 loadHistory();
 setInterval(refresh, 10000);
 setInterval(loadHistory, 60000);
-addEventListener('resize', drawChart);
+addEventListener('resize', () => { if (!isPhoneView()) drawChart(); });
 </script>
 </body></html>
