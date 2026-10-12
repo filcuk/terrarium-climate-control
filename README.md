@@ -94,6 +94,14 @@ mpremote connect auto reset
 Run `preview.py` with the environment active to preview the web locally.
 That serves the page at `http://127.0.0.1:8080/` with sample readings.
 
+For day-to-day board updates (build + copy everything in `dist/` except `wifi.cfg`, then reset):
+
+```bash
+python flash.py
+python flash.py COM5          # explicit port
+python flash.py --no-build    # copy current dist/ only
+```
+
 **Memory limit:** the board compiles `main.py` before any of it runs, and that compile needs one large free block. This doesn't leave enough memory for the WiFi. `python build.py` compiles the controller to `terrarium.mpy` on the PC and leaves the board a one-line `main.py`.
 
 Explanations in `main.py` are `#` comments. A docstring is kept in memory for the whole compile and then thrown away, so it spends the memory WiFi needs. A comment is dropped before the compile and costs nothing. Keep new text as comments.
