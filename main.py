@@ -96,6 +96,11 @@ WEB_PORT = 80
 DEFAULT_HOSTNAME = "terrarium"  # reachable as http://terrarium.local/; override with hostname= in wifi.cfg
 WIFI_RETRY_MIN_MS = 30 * SECOND
 WIFI_RETRY_MAX_MS = 10 * MINUTE
+# Reach the gateway on TCP/53. Success or a quick refuse means the path is up;
+# a timeout means the STA/LWIP stack is wedged even if isconnected() is true.
+NET_HEALTH_MS = 5 * MINUTE
+NET_HEALTH_GRACE_MS = 2 * MINUTE
+NET_HEALTH_TIMEOUT_S = 2
 SEND_CHUNK = 1024
 
 # State Variables
@@ -128,6 +133,8 @@ wifi_cfg = {}
 wifi_connected = False
 wifi_attempt_at = 0
 wifi_retry_ms = WIFI_RETRY_MIN_MS
+net_joined_at = 0
+net_health_at = 0
 device_ip = None
 hostname = None
 server = None
@@ -1458,14 +1465,85 @@ def clock_poll(now):
     sync_time(now)
 
 
+def net_health_ok():
+  # True when the board can still talk to the LAN gateway. Do not connect to our
+  # own :80 here: this loop cannot accept while blocked in connect.
+  try:
+    _ip, _mask, gw, _dns = wlan.ifconfig()
+  except OSError:
+    return False
+  if not gw or gw == "0.0.0.0":
+    return False
+  s = None
+  try:
+    s = socket.socket()
+    s.settimeout(NET_HEALTH_TIMEOUT_S)
+    s.connect(socket.getaddrinfo(gw, 53)[0][-1])
+    return True
+  except OSError as e:
+    # Refused/reset still means L3 works. Timeout means a dead path.
+    code = e.args[0] if e.args else 0
+    if code in (110, 116):
+      return False
+    msg = str(e).lower()
+    if "timed out" in msg or "timeout" in msg:
+      return False
+    return True
+  finally:
+    if s is not None:
+      try:
+        s.close()
+      except OSError:
+        pass
+
+
+def net_health_diag():
+  # One line for events.log when the path looks dead.
+  parts = ["Network: health check failed"]
+  try:
+    parts.append("connected=%s" % wlan.isconnected())
+  except OSError:
+    pass
+  try:
+    parts.append("status=%s" % wlan.status())
+  except (OSError, TypeError, AttributeError):
+    pass
+  try:
+    parts.append("rssi=%s" % wlan.status("rssi"))
+  except (OSError, TypeError, AttributeError, ValueError):
+    pass
+  try:
+    ip, _mask, gw, _dns = wlan.ifconfig()
+    parts.append("ip=%s" % ip)
+    parts.append("gw=%s" % gw)
+  except OSError:
+    pass
+  parts.append("mem_free=%d" % gc.mem_free())
+  log(" ".join(parts))
+
+
+def net_health_poll(now):
+  # Probe on a slow interval after join grace. Recovery is a later step.
+  global net_health_at
+  if utime.ticks_diff(now, net_joined_at) < NET_HEALTH_GRACE_MS:
+    return
+  if utime.ticks_diff(now, net_health_at) < NET_HEALTH_MS:
+    return
+  net_health_at = now
+  if not net_health_ok():
+    net_health_diag()
+
+
 def wifi_poll(now):
-  global wifi_connected, device_ip, wifi_retry_ms
+  global wifi_connected, device_ip, wifi_retry_ms, net_joined_at, net_health_at
   if wlan is None:
     return
   if wlan.isconnected():
     if not wifi_connected:
       wifi_connected = True
       wifi_retry_ms = WIFI_RETRY_MIN_MS
+      net_joined_at = now
+      net_health_at = now
       device_ip = wlan.ifconfig()[0]
       if not time_synced:
         sync_time(now)
@@ -1473,6 +1551,8 @@ def wifi_poll(now):
       if hostname:
         log("Web: also at http://%s.local/" % hostname)
       web_start()
+    else:
+      net_health_poll(now)
   elif wifi_connected:
     wifi_connected = False
     # Drop the listen socket so the next join rebinds instead of keeping a stale one.
