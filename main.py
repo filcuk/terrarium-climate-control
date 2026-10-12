@@ -57,7 +57,7 @@ DAILY_RESET_WINDOW_S = 60
 HISTORY_HARD_CAP = 500
 FAN_KEEP_S = 7 * DAY_S
 FAN_RUNS_MAX = 500  # guard for a stuck fan; a normal week stays well under this
-CHART_MAX_POINTS = 400
+CHART_MAX_POINTS = 200
 SAMPLE_PAGE = 50
 SLOT_S = 30 * 60
 N_SLOTS = 48
@@ -1888,7 +1888,7 @@ def web_start():
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(addr)
-    s.listen(2)
+    s.listen(4)
     s.setblocking(False)
     server = s
   except OSError as e:
@@ -1910,7 +1910,11 @@ def send(conn, status_line, content_type, body):
 
 
 def send_json(conn, data):
-  send(conn, "200 OK", "application/json", json.dumps(data))
+  gc.collect()
+  body = json.dumps(data)
+  send(conn, "200 OK", "application/json", body)
+  body = None
+  gc.collect()
 
 
 def file_size_mtime(path):
@@ -2131,9 +2135,14 @@ def handle(conn, method, path, qs, body, ctype, now):
     elif path == "/api/status":
       send_json(conn, status(now))
     elif path == "/api/logs":
-      send(conn, "200 OK", "text/plain; charset=utf-8", "\n".join(log_lines))
+      gc.collect()
+      body = "\n".join(log_lines)
+      send(conn, "200 OK", "text/plain; charset=utf-8", body)
+      body = None
+      gc.collect()
     elif path == "/api/history":
       page = query_int(qs, "page", 0) if "page=" in qs else None
+      gc.collect()
       send_json(conn, history_json(query_int(qs, "days", 7), page))
     elif path == "/api/maintenance":
       send_json(conn, maintenance_json())
@@ -2183,6 +2192,7 @@ def web_poll(now):
       pass
   finally:
     conn.close()
+    gc.collect()
 
 
 # ---------------------------------------------------------------- boot

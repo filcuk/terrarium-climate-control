@@ -595,8 +595,8 @@ def history_body(qs):
             "samples": chunk,
         }
     pts = window
-    if len(pts) > 400:
-        step = (len(pts) + 399) // 400
+    if len(pts) > 200:
+        step = (len(pts) + 199) // 200
         pts = pts[::step]
     fan = None
     if include_fan:

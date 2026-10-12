@@ -292,11 +292,19 @@ function clock(ts) {
   return new Date(ts * 1000).toLocaleString([], df);
 }
 function mark(p) { return p[3] > 0 ? '\u00d8 ' : ''; }
-async function req(url, opts) {
-  const r = await fetch(url, opts);
-  const t = await r.text();
-  if (!r.ok) throw new Error(t);
-  return t;
+// One in-flight request at a time — the C3 accepts slowly and parallel
+// history/log fetches were wedging WiFi into "Server Not Found".
+let netChain = Promise.resolve();
+function req(url, opts) {
+  const job = async () => {
+    const r = await fetch(url, opts);
+    const t = await r.text();
+    if (!r.ok) throw new Error(t);
+    return t;
+  };
+  const p = netChain.then(job, job);
+  netChain = p.catch(() => {});
+  return p;
 }
 function post(url, data, signal) {
   return req(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data || {}), signal: signal});
@@ -1037,8 +1045,10 @@ function onPhoneMqChange() {
 }
 if (phoneMq.addEventListener) phoneMq.addEventListener('change', onPhoneMqChange);
 else phoneMq.addListener(onPhoneMqChange);
-refresh();
-loadHistory();
+(async () => {
+  await refresh();
+  await loadHistory();
+})();
 setInterval(refresh, 10000);
 setInterval(loadHistory, 60000);
 addEventListener('resize', () => { if (!isPhoneView()) drawChart(); });
