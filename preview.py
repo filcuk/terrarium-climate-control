@@ -88,8 +88,20 @@ def fan_runs(now):
         if now - end <= 7 * DAY:
             runs.append([start, end, manual])
     if not runs:
-        runs.append([now - 3 * 3600, now - 3 * 3600 + 6 * 3600, 0])
-        runs.append([now - 26 * 3600, now - 26 * 3600 + 8 * 60, 1])
+        # Synthetic week of runs for the samples UI: scheduled half-hours,
+        # short on-demand taps, and edges that fall between 15-minute readings.
+        runs = [
+            [now - 45 * 60, now - 45 * 60 + 8 * 60, 1],           # on-demand, recent
+            [now - 2 * 3600 - 7 * 60, now - 2 * 3600 + 23 * 60, 0],  # scheduled, mid-slot edges
+            [now - 5 * 3600, now - 5 * 3600 + 30 * 60, 0],
+            [now - 9 * 3600 - 3 * 60, now - 9 * 3600 + 12 * 60, 1],
+            [now - 26 * 3600, now - 26 * 3600 + 8 * 60, 1],
+            [now - 2 * DAY - 4 * 3600, now - 2 * DAY - 4 * 3600 + 30 * 60, 0],
+            [now - 3 * DAY - 10 * 60, now - 3 * DAY + 20 * 60, 0],
+            [now - 4 * DAY - 2 * 3600, now - 4 * DAY - 2 * 3600 + 15 * 60, 1],
+            [now - 5 * DAY, now - 5 * DAY + 30 * 60, 0],
+            [now - 6 * DAY - 90 * 60, now - 6 * DAY - 90 * 60 + 30 * 60, 0],
+        ]
     return runs
 
 
@@ -120,6 +132,10 @@ def ensure_data():
         FANS = fan_runs(now)
         SAMPLE_PAUSE = (now - 20 * 3600, now - 18 * 3600)
         POINTS = [p for p in POINTS if p[0] < SAMPLE_PAUSE[0] or p[0] > SAMPLE_PAUSE[1]]
+        # Land one fan start on a climate timestamp so the delete chooser is testable.
+        if POINTS and FANS and not _read_hist("fan.hist"):
+            anchor = int(POINTS[-3][0]) if len(POINTS) >= 3 else int(POINTS[-1][0])
+            FANS[0] = [anchor, anchor + 8 * 60, 1]
         MAINT = [
             [now - 2 * 3600, "Mist", ""],
             [now - 26 * 3600, "Feed", ""],
