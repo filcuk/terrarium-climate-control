@@ -1475,6 +1475,8 @@ def wifi_poll(now):
       web_start()
   elif wifi_connected:
     wifi_connected = False
+    # Drop the listen socket so the next join rebinds instead of keeping a stale one.
+    web_stop()
     log("WiFi: connection lost, reconnecting...")
     wifi_connect(now)
   elif utime.ticks_diff(now, wifi_attempt_at) >= wifi_retry_ms:
@@ -1484,6 +1486,17 @@ def wifi_poll(now):
 
 
 # ---------------------------------------------------------------- web
+
+def web_stop():
+  global server
+  if server is None:
+    return
+  try:
+    server.close()
+  except OSError:
+    pass
+  server = None
+
 
 def web_start():
   global server
