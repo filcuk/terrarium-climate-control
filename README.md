@@ -90,6 +90,7 @@ Explanations in `main.py` are `#` comments. A docstring is kept in memory for th
 | Event                              | Result                                                                 |
 | ---------------------------------- | ---------------------------------------------------------------------- |
 | WiFi not configured or can't connect | The fan and button still work. The board keeps retrying WiFi in the background, waiting longer between attempts, up to every 10 minutes. |
+| Network wedged while showing connected | The board probes the gateway every 5 minutes; recovers through web rebind, STA rejoin, interface bounce, then resets after 3 failed cycles. Logged in `events.log`. |
 | Errors inside the loop (less than 20)         | Logged and skipped; 20 consecutive errors reset the board                    |
 | Clock not synced yet               | Schedule stays off. The fan card says "Waiting for clock". On-demand still works. The board retries every minute. |
 | Inside a selected half-hour on a selected day | Fan runs until that stretch ends, or at midnight if the next day is off |
