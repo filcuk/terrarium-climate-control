@@ -107,6 +107,9 @@ PAUSE_SINCE = 0
 PAUSES = []
 HUMIDITY_LIMIT = 0
 HUMIDITY_GATE = 5
+DAILY_RESET = 1
+DAILY_RESET_HOUR = 3
+DAILY_RESET_MINUTE = 0
 
 
 def ensure_data():
@@ -246,6 +249,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global MAINT_REV, CATEGORIES, PREVIEW_TZ, SENSOR_AT, POINTS
         global RECORDING, PAUSE_SINCE, PAUSES, SAMPLE_PAUSE, HUMIDITY_LIMIT, HUMIDITY_GATE
+        global DAILY_RESET, DAILY_RESET_HOUR, DAILY_RESET_MINUTE
         ensure_data()
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -297,6 +301,19 @@ class Handler(BaseHTTPRequestHandler):
                 record = int(data.get("record", 1))
             except (TypeError, ValueError):
                 record = 1
+            try:
+                daily_reset = int(data.get("daily_reset", 1))
+                daily_reset_hour = int(data.get("daily_reset_hour", 3))
+                daily_reset_minute = int(data.get("daily_reset_minute", 0))
+            except (TypeError, ValueError):
+                self._send(400, "text/plain", "Invalid daily reset.")
+                return
+            if daily_reset not in (0, 1) or not 0 <= daily_reset_hour <= 23 or not 0 <= daily_reset_minute <= 59:
+                self._send(400, "text/plain", "Invalid daily reset.")
+                return
+            DAILY_RESET = daily_reset
+            DAILY_RESET_HOUR = daily_reset_hour
+            DAILY_RESET_MINUTE = daily_reset_minute
             now = int(time.time())
             if record:
                 if not RECORDING and PAUSE_SINCE:
@@ -433,6 +450,9 @@ def status_body():
         "sensor_at": SENSOR_AT,
         "sensor_interval_min": 15,
         "record": 0 if not RECORDING else 1,
+        "daily_reset": DAILY_RESET,
+        "daily_reset_hour": DAILY_RESET_HOUR,
+        "daily_reset_minute": DAILY_RESET_MINUTE,
         "humidity_limit": HUMIDITY_LIMIT,
         "humidity_gate": HUMIDITY_GATE,
         "humidity_hold": held,

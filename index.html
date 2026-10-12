@@ -216,6 +216,8 @@ button.x:hover{background:none;color:#c0392b}
     <div class="row"><label for="tzName">Timezone</label><input id="tzName" class="wide" type="text" autocomplete="off" spellcheck="false" required></div>
     <div class="row"><label for="cats">Maintenance categories</label><input id="cats" class="wide" type="text" maxlength="220" autocomplete="off"></div>
     <div class="row"><label for="pauseRec">Pause recording</label><input id="pauseRec" type="checkbox"></div>
+    <div class="row"><label for="dreset">Daily reset</label><input id="dreset" type="checkbox"></div>
+    <div class="row"><label for="dresetAt">Reset at</label><input id="dresetAt" type="time" required></div>
     <div class="actions">
       <button>Save</button>
       <button type="button" class="secondary" onclick="openSheet('download')">Download</button>
@@ -684,6 +686,10 @@ async function refresh() {
       $('tzName').value = s.timezone || '';
       $('cats').value = (s.categories || []).join(', ');
       $('pauseRec').checked = s.record === 0;
+      $('dreset').checked = s.daily_reset !== 0;
+      const rh = String(s.daily_reset_hour == null ? 3 : s.daily_reset_hour).padStart(2, '0');
+      const rm = String(s.daily_reset_minute == null ? 0 : s.daily_reset_minute).padStart(2, '0');
+      $('dresetAt').value = rh + ':' + rm;
       paintDays(s.weekdays || '');
       paintSlots(s.segments || '');
       formLoaded = true;
@@ -839,10 +845,13 @@ function saveSchedule() {
     humidity_limit: +$('hlim').value, humidity_gate: +$('hgate').value});
 }
 function saveAdvanced() {
+  const t = ($('dresetAt').value || '03:00').split(':');
   submit('advMsg', 'Saving\u2026', 'Saved.', '/api/settings', {
     sensor_interval_min: +$('sint').value, log_keep: +$('lkeep').value,
     timezone: $('tzName').value, maint_categories: $('cats').value,
-    record: $('pauseRec').checked ? 0 : 1}, loadHistory);
+    record: $('pauseRec').checked ? 0 : 1,
+    daily_reset: $('dreset').checked ? 1 : 0,
+    daily_reset_hour: +t[0], daily_reset_minute: +(t[1] || 0)}, loadHistory);
 }
 function deleteCross(action) {
   const b = document.createElement('button');

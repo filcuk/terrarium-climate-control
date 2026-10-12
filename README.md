@@ -96,6 +96,7 @@ Explanations in `main.py` are `#` comments. A docstring is kept in memory for th
 | Inside a selected half-hour on a selected day | Fan runs until that stretch ends, or at midnight if the next day is off |
 | Humidity at or below the limit during a selected half-hour | Scheduled fan stops. It starts again in that stretch only after humidity rises above the limit plus the gate. On-demand runs still work. A missing reading does not flip the fan. |
 | Pause recording in Advanced | Temperature, humidity, and fan history stop. The chart shows that time in gray. The fan schedule keeps running, and the humidity limit is ignored until recording resumes. |
+| Daily reset (Advanced; default 03:00 on) | At that local time the board hard-resets. Turn it off or change the time in Advanced. Needs a synced clock; skipped for a few minutes after boot so a 03:00 reset does not loop. |
 | Selected 23:30 and 00:00, both days on | One run from 23:30 to 00:30                                       |
 | A day left off                     | The fan stays off that day. The next run is the next selected day.    |
 | Button or web button while fan on  | Fan stops for the rest of that stretch. A reboot can start it again.  |
@@ -113,7 +114,7 @@ Explanations in `main.py` are `#` comments. A docstring is kept in memory for th
 | `index.html.gz` | yes           | Compressed copy of the page. `build.py` refreshes it. Served instead of `index.html` unless `index.html` is newer. |
 | `wifi.cfg`     | yes            | WiFi credentials. Copy `wifi.cfg.example`, fill it in, and save it on the board as `wifi.cfg`.                         |
 | `schedule.cfg` | no             | Created when you save Ventilation from the web page. |
-| `settings.cfg` | no             | Sensor interval, log size, timezone, maintenance categories, and whether recording is paused. |
+| `settings.cfg` | no             | Sensor interval, log size, timezone, maintenance categories, recording pause, and daily reset. |
 | `events.log`   | no             | Rolling log of system status, warnings, and errors. |
 | `climate.hist` | no             | Temperature and humidity. |
 | `fan.hist`     | no             | Fan run times.                                      |

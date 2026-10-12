@@ -46,6 +46,12 @@ SENSOR_RETRY_MS = 30 * SECOND  # after a failed read; the AM2302 needs at least 
 DEFAULT_LOG_KEEP = 100
 MIN_LOG_KEEP = 20
 MAX_LOG_KEEP = 250
+# Daily board reset from Advanced. Default on at 03:00 local time.
+DEFAULT_DAILY_RESET = 1
+DEFAULT_DAILY_RESET_HOUR = 3
+DEFAULT_DAILY_RESET_MINUTE = 0
+DAILY_RESET_GRACE_MS = 5 * MINUTE
+DAILY_RESET_WINDOW_S = 60
 # Climate history is folded as it ages: raw, 1h, 4h, 12h, then dropped after 30 days.
 # 500 is only a guard. A 5-minute readout for 30 days is about 410 points.
 HISTORY_HARD_CAP = 500
@@ -116,6 +122,11 @@ log_keep = DEFAULT_LOG_KEEP
 maint_categories = list(DEFAULT_CATEGORIES)
 settings_timezone = ""  # empty: wifi.cfg timezone is used
 settings_tz_rejected = ""
+daily_reset_on = DEFAULT_DAILY_RESET == 1
+daily_reset_hour = DEFAULT_DAILY_RESET_HOUR
+daily_reset_minute = DEFAULT_DAILY_RESET_MINUTE
+daily_reset_done_day = -1  # local day index already handled
+boot_at = 0
 
 manual_start = 0
 manual_running = False
@@ -548,7 +559,7 @@ def purge_log():
 
 def load_settings():
   global sensor_interval_ms, log_keep, maint_categories, settings_timezone, settings_tz_rejected
-  global recording, pause_since
+  global recording, pause_since, daily_reset_on, daily_reset_hour, daily_reset_minute
   cfg = read_cfg(SETTINGS_CFG)
   # sensor_interval_s from older builds is ignored so a saved 10 seconds becomes 15 minutes
   interval = cfg_int(cfg, "sensor_interval_min", MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN,
@@ -563,6 +574,9 @@ def load_settings():
   settings_tz_rejected = name if name and name not in ZONES else ""
   settings_timezone = "" if settings_tz_rejected else name
   recording = cfg_int(cfg, "record", 0, 1, 1) == 1
+  daily_reset_on = cfg_int(cfg, "daily_reset", 0, 1, DEFAULT_DAILY_RESET) == 1
+  daily_reset_hour = cfg_int(cfg, "daily_reset_hour", 0, 23, DEFAULT_DAILY_RESET_HOUR)
+  daily_reset_minute = cfg_int(cfg, "daily_reset_minute", 0, 59, DEFAULT_DAILY_RESET_MINUTE)
   pause_since = 0
   if not recording:
     try:
@@ -584,6 +598,9 @@ def write_settings_file():
   parts.append("record=%d" % (1 if recording else 0))
   if not recording and pause_since:
     parts.append("pause_since=%d" % pause_since)
+  parts.append("daily_reset=%d" % (1 if daily_reset_on else 0))
+  parts.append("daily_reset_hour=%d" % daily_reset_hour)
+  parts.append("daily_reset_minute=%d" % daily_reset_minute)
   with open(SETTINGS_CFG, "w") as f:
     f.write("\n".join(parts) + "\n")
 
@@ -623,11 +640,15 @@ def ensure_pause_open():
     pass
 
 
-def save_settings(interval, keep, zone, categories, record):
+def save_settings(interval, keep, zone, categories, record, reset_on, reset_hour, reset_minute):
   global sensor_interval_ms, log_keep, sensor_due_at, maint_categories
+  global daily_reset_on, daily_reset_hour, daily_reset_minute, daily_reset_done_day
   check_range(interval, MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN, "Sensor interval (minutes)")
   check_range(keep, MIN_LOG_KEEP, MAX_LOG_KEEP, "Log lines kept")
   check_range(int(record), 0, 1, "Recording")
+  check_range(int(reset_on), 0, 1, "Daily reset")
+  check_range(int(reset_hour), 0, 23, "Daily reset hour")
+  check_range(int(reset_minute), 0, 59, "Daily reset minute")
   zone = str(zone).strip()
   if zone not in ZONES:
     raise ValueError("Unknown timezone.")
@@ -640,9 +661,43 @@ def save_settings(interval, keep, zone, categories, record):
   rewrite_log_file()
   maint_categories = names
   apply_settings_zone(zone)
+  daily_reset_on = int(reset_on) == 1
+  daily_reset_hour = int(reset_hour)
+  daily_reset_minute = int(reset_minute)
+  daily_reset_done_day = -1
   write_settings_file()
-  log("Settings changed: sensor every %d min, keep %d log lines, %d maintenance categories%s." % (
-    interval, keep, len(names), "" if recording else ", recording paused"))
+  if daily_reset_on:
+    reset_txt = ", daily reset at %02d:%02d" % (daily_reset_hour, daily_reset_minute)
+  else:
+    reset_txt = ", daily reset off"
+  log("Settings changed: sensor every %d min, keep %d log lines, %d maintenance categories%s%s." % (
+    interval, keep, len(names), "" if recording else ", recording paused", reset_txt))
+
+
+def daily_reset_poll(now):
+  # Local-time window once per day. Skip the first minutes after boot so a reset
+  # at 03:00 does not loop when the board comes back still inside that minute.
+  global daily_reset_done_day
+  if not daily_reset_on or not time_synced or boot_at == 0:
+    return
+  if utime.ticks_diff(now, boot_at) < DAILY_RESET_GRACE_MS:
+    return
+  _ts, local, _slot, _into = local_parts()
+  sec_day = int(local % DAY_S)
+  day = int(local) // DAY_S
+  if day == daily_reset_done_day:
+    return
+  target = daily_reset_hour * 3600 + daily_reset_minute * 60
+  if sec_day < target:
+    return
+  if sec_day >= target + DAILY_RESET_WINDOW_S:
+    # Booted after today's window; wait until tomorrow.
+    daily_reset_done_day = day
+    return
+  daily_reset_done_day = day
+  log("Scheduled daily reset at %02d:%02d." % (daily_reset_hour, daily_reset_minute))
+  fan_pin.value(0)
+  machine.reset()
 
 
 # ---------------------------------------------------------------- schedule
@@ -913,6 +968,9 @@ def status(now):
     "sensor_at": None if sensor_at is None else sensor_at + EPOCH_OFFSET_S,
     "sensor_interval_min": sensor_interval_ms // MINUTE,
     "record": 1 if recording else 0,
+    "daily_reset": 1 if daily_reset_on else 0,
+    "daily_reset_hour": daily_reset_hour,
+    "daily_reset_minute": daily_reset_minute,
     "humidity_limit": humidity_limit,
     "humidity_gate": humidity_gate,
     "humidity_hold": bool(in_slot and humidity_hold),
@@ -1876,7 +1934,10 @@ def api_schedule(data, now):
 def api_settings(data, now):
   save_settings(int(data["sensor_interval_min"]), int(data["log_keep"]),
                 str(data["timezone"]), str(data.get("maint_categories", "")),
-                int(data.get("record", 1)))
+                int(data.get("record", 1)),
+                int(data.get("daily_reset", DEFAULT_DAILY_RESET)),
+                int(data.get("daily_reset_hour", DEFAULT_DAILY_RESET_HOUR)),
+                int(data.get("daily_reset_minute", DEFAULT_DAILY_RESET_MINUTE)))
 
 
 def api_history_delete(data, now):
@@ -2002,8 +2063,12 @@ _cause = machine.reset_cause()
 log("Terrarium Climate Controller starting (ESP32-C3), reset cause: %s" % RESET_CAUSE_NAMES.get(_cause, _cause))
 log("Pins: fan=GPIO%d  button=GPIO%d  sensor=GPIO%d" % (FAN_GPIO, BTN_GPIO, DHT_GPIO))
 log("Schedule: %s" % schedule_text())
-log("Settings: sensor every %d min, keep %d log lines%s." % (
-  sensor_interval_ms // MINUTE, log_keep, "" if recording else ", recording paused"))
+if daily_reset_on:
+  _reset_txt = ", daily reset at %02d:%02d" % (daily_reset_hour, daily_reset_minute)
+else:
+  _reset_txt = ", daily reset off"
+log("Settings: sensor every %d min, keep %d log lines%s%s." % (
+  sensor_interval_ms // MINUTE, log_keep, "" if recording else ", recording paused", _reset_txt))
 
 button_start()
 sensor_start()
@@ -2020,6 +2085,7 @@ load_maintenance()
 load_pauses()
 log_memory()
 mem_logged_at = utime.ticks_ms()
+boot_at = utime.ticks_ms()
 log("Controller ready.")
 
 
@@ -2033,6 +2099,7 @@ def control_step(now):
   clock_poll(now)
   ensure_pause_open()
   sensor_poll(now)
+  daily_reset_poll(now)
   if utime.ticks_diff(now, mem_logged_at) >= MEM_LOG_MS:
     log_memory()
     mem_logged_at = now
