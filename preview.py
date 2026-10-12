@@ -32,6 +32,26 @@ def _read_hist(name):
     return rows
 
 
+def _synthetic_climate(start, end):
+    """Age-tiered fake readings from start (inclusive) up to end (exclusive)."""
+    raw = []
+    t = start
+    while t < end:
+        age = end - t
+        if age > 7 * DAY:
+            step, span = 12 * 3600, 12 * 3600
+        elif age > 3 * DAY:
+            step, span = 4 * 3600, 4 * 3600
+        elif age > DAY:
+            step, span = 3600, 3600
+        else:
+            step, span = 15 * 60, 0
+        temp = 23 + (t % 86400) / 86400 * 2
+        raw.append((t, round(temp, 1), round(55 - (t % 86400) / 86400 * 8, 1), span))
+        t += step
+    return raw
+
+
 def climate_points(now):
     """Browser timestamps. span 0 is a raw reading; larger spans are averages."""
     raw = []
@@ -44,21 +64,7 @@ def climate_points(now):
         except ValueError:
             continue
     if not raw:
-        t = now - 30 * DAY
-        while t < now:
-            age = now - t
-            if age > 7 * DAY:
-                step, span = 12 * 3600, 12 * 3600
-            elif age > 3 * DAY:
-                step, span = 4 * 3600, 4 * 3600
-            elif age > DAY:
-                step, span = 3600, 3600
-            else:
-                step, span = 15 * 60, 0
-            temp = 23 + (t % 86400) / 86400 * 2
-            raw.append((t, round(temp, 1), round(55 - (t % 86400) / 86400 * 8, 1), span))
-            t += step
-        return raw
+        return _synthetic_climate(now - 30 * DAY, now)
     first = raw[0][0]
     older = []
     t = first - 30 * DAY
@@ -73,7 +79,11 @@ def climate_points(now):
         older.append((t, 22.5, 60.0, span))
         t += step
     points = older + [(ts, temp, hum, 0) for ts, temp, hum in raw]
-    return [p for p in points if now - p[0] <= 30 * DAY]
+    points = [p for p in points if now - p[0] <= 30 * DAY]
+    # A stale device/climate.hist dump leaves the 7-day window empty; fill to now.
+    if points and now - points[-1][0] > 3600:
+        points = points + _synthetic_climate(points[-1][0] + 15 * 60, now)
+    return points
 
 
 def fan_runs(now):
