@@ -142,10 +142,12 @@ def ensure_data():
         FANS = fan_runs(now)
         SAMPLE_PAUSE = (now - 20 * 3600, now - 18 * 3600)
         POINTS = [p for p in POINTS if p[0] < SAMPLE_PAUSE[0] or p[0] > SAMPLE_PAUSE[1]]
-        # Land one fan start on a climate timestamp so the delete chooser is testable.
-        if POINTS and FANS and not _read_hist("fan.hist"):
-            anchor = int(POINTS[-3][0]) if len(POINTS) >= 3 else int(POINTS[-1][0])
-            FANS[0] = [anchor, anchor + 8 * 60, 1]
+        # Land one fan start on a climate timestamp so a flags=both row exists too.
+        if POINTS and FANS:
+            climate_ts = set(int(p[0]) for p in POINTS)
+            if int(FANS[0][0]) not in climate_ts:
+                anchor = int(POINTS[-3][0]) if len(POINTS) >= 3 else int(POINTS[-1][0])
+                FANS[0] = [anchor, anchor + 8 * 60, int(FANS[0][2])]
         MAINT = [
             [now - 2 * 3600, "Mist", ""],
             [now - 26 * 3600, "Feed", ""],
@@ -384,8 +386,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, "text/plain", "Sample not found.")
                 return
             which = data.get("which")
+
+            def fan_match(start, end):
+                return start == ts or end == ts or (start <= ts < end)
+
             has_climate = any(int(p[0]) == ts for p in POINTS)
-            has_fan = any(int(r[0]) == ts or int(r[1]) == ts for r in FANS)
+            has_fan = any(fan_match(int(r[0]), int(r[1])) for r in FANS)
             if which is None:
                 if has_climate and has_fan:
                     self._send(400, "text/plain", "Choose climate or fan.")
@@ -398,8 +404,14 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 POINTS = kept
             elif which == "fan":
-                kept = [r for r in FANS if int(r[0]) != ts and int(r[1]) != ts]
-                if len(kept) == len(FANS):
+                kept = []
+                removed = False
+                for r in FANS:
+                    if not removed and fan_match(int(r[0]), int(r[1])):
+                        removed = True
+                        continue
+                    kept.append(r)
+                if not removed:
                     self._send(400, "text/plain", "Fan run not found.")
                     return
                 FANS = kept

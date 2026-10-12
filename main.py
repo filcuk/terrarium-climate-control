@@ -1307,11 +1307,22 @@ def delete_climate_at(device_ts):
   rewrite_history_file()
 
 
+def fan_run_matches(device_ts, start, end):
+  # Start/end edge, or a climate sample taken while the run was on.
+  return start == device_ts or end == device_ts or (start <= device_ts < end)
+
+
 def delete_fan_at(device_ts):
-  kept = [r for r in fan_runs if r[0] != device_ts and r[1] != device_ts]
-  if len(kept) == len(fan_runs):
-    if fan_run_start is not None and fan_run_start == device_ts:
-      raise ValueError("Active fan run cannot be deleted.")
+  if fan_run_start is not None and fan_run_start <= device_ts:
+    raise ValueError("Active fan run cannot be deleted.")
+  kept = []
+  removed = False
+  for run in fan_runs:
+    if not removed and fan_run_matches(device_ts, run[0], run[1]):
+      removed = True
+      continue
+    kept.append(run)
+  if not removed:
     raise ValueError("Fan run not found.")
   fan_runs[:] = kept
   rewrite_fan_runs_file()
@@ -1321,8 +1332,8 @@ def delete_history_point(unix_ts, which=None):
   # which is "climate", "fan", or None when only one record exists at ts.
   device_ts = int(unix_ts) - EPOCH_OFFSET_S
   has_climate = any(p[0] == device_ts for p in history)
-  has_fan = any(r[0] == device_ts or r[1] == device_ts for r in fan_runs)
-  if fan_run_start is not None and fan_run_start == device_ts:
+  has_fan = any(fan_run_matches(device_ts, r[0], r[1]) for r in fan_runs)
+  if fan_run_start is not None and fan_run_start <= device_ts:
     has_fan = True
   if which is None:
     if has_climate and has_fan:

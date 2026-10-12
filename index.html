@@ -514,8 +514,13 @@ function toggleSamples() {
   $('samples').style.display = samplesOpen ? '' : 'none';
   if (samplesOpen) { samplePage = 0; loadSamples(); }
 }
-function sampleHasClimate(p) { return (p[5] || SAMPLE_CLIMATE) & SAMPLE_CLIMATE; }
-function sampleHasFanEdge(p) { return (p[5] || 0) & SAMPLE_FAN_EDGE; }
+function sampleFlags(p) { return p[5] == null ? SAMPLE_CLIMATE : p[5]; }
+function sampleHasClimate(p) { return sampleFlags(p) & SAMPLE_CLIMATE; }
+function sampleHasFanEdge(p) { return sampleFlags(p) & SAMPLE_FAN_EDGE; }
+// Fan column On during a run counts too — not only exact start/end rows.
+function sampleHasFanRecord(p) {
+  return sampleHasFanEdge(p) || (sampleHasClimate(p) && !!p[4] && chartDays <= 7);
+}
 function sampleTempText(p) {
   return sampleHasClimate(p) ? mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C' : '\u2014';
 }
@@ -908,7 +913,7 @@ function confirmDelete(message, action) {
   $('sheet').hidden = false;
 }
 function askDeleteSample(p) {
-  const hasC = sampleHasClimate(p), hasF = sampleHasFanEdge(p);
+  const hasC = sampleHasClimate(p), hasF = sampleHasFanRecord(p);
   if (hasC && hasF) {
     const panel = $('sheetPanel');
     panel.textContent = '';
