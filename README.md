@@ -60,19 +60,34 @@ python -m pip install -r requirements.txt
 python build.py
 ```
 
-4. Copy `dist/*` to the board (Thonny, `mpremote`, etc.).
-  ```bash
-  mpremote connect auto cp dist/main.py :main.py
-  mpremote connect auto cp dist/terrarium.mpy :terrarium.mpy
-  mpremote connect auto cp dist/index.html :index.html
-  mpremote connect auto cp dist/index.html.gz :index.html.gz
-  mpremote connect auto cp dist/icon.webp :icon.webp
-  mpremote connect auto cp dist/favicon.ico :favicon.ico
-  mpremote connect auto cp wifi.cfg :wifi.cfg
-  mpremote connect auto reset
-  ```
-5. Reset the board. Once it's on WiFi, the log shows the address & IP.
-6. Open that address in a browser on the same network.
+4. With the board plugged in over USB, find it with `mpremote` (installed by `requirements.txt` in step 2):
+
+```bash
+mpremote connect list
+```
+
+`connect auto` picks the first suitable serial port. If you have more than one device, use the port from the list instead (for example `COM5` on Windows, `/dev/ttyACM0` on Linux):
+
+```bash
+mpremote connect auto
+# or: mpremote connect COM5
+```
+
+5. Copy `dist/*` to the board (Thonny, `mpremote`, etc.). Use the same port as in step 4 (`auto` or an explicit name):
+
+```bash
+mpremote connect auto cp dist/main.py :main.py
+mpremote connect auto cp dist/terrarium.mpy :terrarium.mpy
+mpremote connect auto cp dist/index.html :index.html
+mpremote connect auto cp dist/index.html.gz :index.html.gz
+mpremote connect auto cp dist/icon.webp :icon.webp
+mpremote connect auto cp dist/favicon.ico :favicon.ico
+mpremote connect auto cp wifi.cfg :wifi.cfg
+mpremote connect auto reset
+```
+
+6. Reset the board. Once it's on WiFi, the log shows the address & IP.
+7. Open that address in a browser on the same network.
 
 ## Development
 

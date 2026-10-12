@@ -163,6 +163,10 @@ net_health_at = 0
 net_recover_step = -1
 net_recover_cycles = 0
 net_recover_at = 0
+# History stays on flash until WiFi has joined (or a short offline wait), so the
+# driver still has a large free heap block while associating.
+history_loaded = False
+HISTORY_LOAD_WAIT_MS = 30 * SECOND
 device_ip = None
 hostname = None
 server = None
@@ -1810,6 +1814,22 @@ def net_health_poll(now):
     net_recover_begin(now)
 
 
+def load_runtime_data():
+  # Climate/fan/maintenance from flash. Deferred until after WiFi joins.
+  global history_loaded, mem_logged_at
+  if history_loaded:
+    return
+  load_history()
+  load_fan_runs()
+  load_maintenance()
+  load_pauses()
+  gc.collect()
+  log_memory()
+  mem_logged_at = utime.ticks_ms()
+  history_loaded = True
+  log("History loaded.")
+
+
 def wifi_poll(now):
   global wifi_connected, device_ip, wifi_retry_ms, net_joined_at, net_health_at
   if wlan is None:
@@ -1826,7 +1846,9 @@ def wifi_poll(now):
       log("WiFi: connected. Device IP: %s  ->  http://%s/" % (device_ip, device_ip))
       if hostname:
         log("Web: also at http://%s.local/" % hostname)
+      gc.collect()
       web_start()
+      load_runtime_data()
     else:
       net_health_poll(now)
   elif wifi_connected:
@@ -2198,20 +2220,16 @@ log("Settings: sensor every %d min, keep %d log lines%s%s." % (
 
 button_start()
 sensor_start()
-# WiFi needs one large free block, so the history files stay unloaded until
-# after the join. Reading flash while it is associating stalls the radio on
-# this single-core chip, and the join then waits until the next retry.
+# WiFi needs one large free block, so history stays on flash until the join
+# finishes (see load_runtime_data). Flash reads during association stall the
+# radio on this single-core chip and leave the heap too tight for the stack.
 wifi_start(utime.ticks_ms())
 
 print("Waiting %s before enabling the fan..." % fmt_duration(STARTUP_DELAY_MS))
 utime.sleep_ms(STARTUP_DELAY_MS)
-load_history()
-load_fan_runs()
-load_maintenance()
-load_pauses()
-log_memory()
-mem_logged_at = utime.ticks_ms()
 boot_at = utime.ticks_ms()
+mem_logged_at = boot_at
+log_memory()
 log("Controller ready.")
 
 
@@ -2222,11 +2240,15 @@ def control_step(now):
 
   refresh_tz()
   wifi_poll(now)
+  # No wifi.cfg: load history after a short wait so the fan schedule still works.
+  if (not history_loaded and wlan is None and
+      utime.ticks_diff(now, boot_at) >= HISTORY_LOAD_WAIT_MS):
+    load_runtime_data()
   clock_poll(now)
   ensure_pause_open()
   sensor_poll(now)
   daily_reset_poll(now)
-  if utime.ticks_diff(now, mem_logged_at) >= MEM_LOG_MS:
+  if history_loaded and utime.ticks_diff(now, mem_logged_at) >= MEM_LOG_MS:
     log_memory()
     mem_logged_at = now
 
