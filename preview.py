@@ -249,7 +249,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, "text/plain", "Not found")
 
     def do_POST(self):
-        global MAINT_REV, CATEGORIES, PREVIEW_TZ, SENSOR_AT, POINTS
+        global MAINT_REV, CATEGORIES, PREVIEW_TZ, SENSOR_AT, POINTS, FANS
         global RECORDING, PAUSE_SINCE, PAUSES, SAMPLE_PAUSE, HUMIDITY_LIMIT, HUMIDITY_GATE
         global DAILY_RESET, DAILY_RESET_HOUR, DAILY_RESET_MINUTE
         ensure_data()
@@ -357,11 +357,29 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self._send(400, "text/plain", "Sample not found.")
                 return
-            kept = [p for p in POINTS if int(p[0]) != ts]
-            if len(kept) == len(POINTS):
+            which = data.get("which")
+            has_climate = any(int(p[0]) == ts for p in POINTS)
+            has_fan = any(int(r[0]) == ts or int(r[1]) == ts for r in FANS)
+            if which is None:
+                if has_climate and has_fan:
+                    self._send(400, "text/plain", "Choose climate or fan.")
+                    return
+                which = "climate" if has_climate else "fan" if has_fan else None
+            if which == "climate":
+                kept = [p for p in POINTS if int(p[0]) != ts]
+                if len(kept) == len(POINTS):
+                    self._send(400, "text/plain", "Sample not found.")
+                    return
+                POINTS = kept
+            elif which == "fan":
+                kept = [r for r in FANS if int(r[0]) != ts and int(r[1]) != ts]
+                if len(kept) == len(FANS):
+                    self._send(400, "text/plain", "Fan run not found.")
+                    return
+                FANS = kept
+            else:
                 self._send(400, "text/plain", "Sample not found.")
                 return
-            POINTS = kept
             self._send(200, "application/json", json.dumps(status_body()))
             return
         if path == "/api/maintenance-delete":
@@ -473,6 +491,38 @@ def status_body():
     }
 
 
+def preview_sample_events(window, cutoff, include_fan):
+    runs = [r for r in FANS if r[1] >= cutoff] if include_fan else []
+    edges = {}
+    if include_fan:
+        for start, end, _manual in runs:
+            if start >= cutoff:
+                edges[start] = 1
+            if end >= cutoff:
+                edges[end] = 0
+
+    def fan_on_at(ts):
+        for start, end, _manual in runs:
+            if start <= ts < end:
+                return 1
+        return 0
+
+    events = []
+    for p in window:
+        ts = int(p[0])
+        if ts in edges:
+            fan = edges.pop(ts)
+            events.append([ts, p[1], p[2], p[3] if len(p) > 3 else 0, fan, 3])
+        else:
+            fan = fan_on_at(ts) if include_fan else 0
+            events.append([ts, p[1], p[2], p[3] if len(p) > 3 else 0, fan, 1])
+    for ts, fan in edges.items():
+        events.append([ts, None, None, 0, fan, 2])
+    if edges:
+        events.sort(key=lambda row: row[0])
+    return events
+
+
 def history_body(qs):
     try:
         days = int(qs.get("days", "7"))
@@ -483,25 +533,27 @@ def history_body(qs):
     now = int(time.time())
     cutoff = now - days * DAY
     window = [p for p in POINTS if p[0] >= cutoff]
+    include_fan = days <= 7
     if "page" in qs:
         try:
             page = max(0, int(qs.get("page", "0")))
         except ValueError:
             page = 0
-        rows = list(reversed(window))
+        events = preview_sample_events(window, cutoff, include_fan)
+        rows = list(reversed(events))
         chunk = rows[page * 50:(page + 1) * 50]
         return {
             "days": days,
             "total": len(rows),
             "page": page,
-            "samples": [list(p) for p in chunk],
+            "samples": chunk,
         }
     pts = window
     if len(pts) > 400:
         step = (len(pts) + 399) // 400
         pts = pts[::step]
     fan = None
-    if days <= 7:
+    if include_fan:
         fan = [r for r in FANS if r[1] >= cutoff]
     pauses = []
     if SAMPLE_PAUSE and SAMPLE_PAUSE[1] > cutoff:

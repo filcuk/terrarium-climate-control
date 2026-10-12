@@ -1154,6 +1154,70 @@ def point_json(p):
   return [p[0] + EPOCH_OFFSET_S, p[1] / 10, p[2] / 10, p[3]]
 
 
+# Sample row flags: climate reading and/or a fan start/end at this timestamp.
+SAMPLE_HAS_CLIMATE = 1
+SAMPLE_HAS_FAN_EDGE = 2
+
+
+def fan_on_at(ts, runs, open_start):
+  if open_start is not None and open_start <= ts:
+    return 1
+  for start, end, _manual in runs:
+    if start <= ts < end:
+      return 1
+  return 0
+
+
+def fan_runs_for_window(cutoff, now_ts):
+  runs = [r for r in fan_runs if r[1] >= cutoff]
+  open_start = None
+  open_manual = 0
+  if fan_run_start is not None and fan_run_start >= cutoff:
+    open_start = fan_run_start
+    open_manual = fan_run_manual
+  return runs, open_start, open_manual
+
+
+def history_sample_events(window, cutoff, now_ts, include_fan):
+  # Ascending (device_ts, climate_point_or_None, fan_on, flags).
+  runs = []
+  open_start = None
+  if include_fan:
+    runs, open_start, _m = fan_runs_for_window(cutoff, now_ts)
+  edges = {}
+  if include_fan:
+    for start, end, _manual in runs:
+      if start >= cutoff:
+        edges[start] = 1
+      if end >= cutoff:
+        edges[end] = 0
+    if open_start is not None:
+      edges[open_start] = 1
+  events = []
+  for p in window:
+    ts = p[0]
+    if ts in edges:
+      fan = edges.pop(ts)
+      events.append((ts, p, fan, SAMPLE_HAS_CLIMATE | SAMPLE_HAS_FAN_EDGE))
+    else:
+      fan = fan_on_at(ts, runs, open_start) if include_fan else 0
+      events.append((ts, p, fan, SAMPLE_HAS_CLIMATE))
+  for ts, fan in edges.items():
+    events.append((ts, None, fan, SAMPLE_HAS_FAN_EDGE))
+  # Fan-only stamps may sit between climate points; keep time order.
+  if edges:
+    events.sort(key=lambda row: row[0])
+  return events
+
+
+def sample_json(row):
+  ts, point, fan, flags = row
+  unix = ts + EPOCH_OFFSET_S
+  if point is None:
+    return [unix, None, None, 0, fan, flags]
+  return [unix, point[1] / 10, point[2] / 10, point[3], fan, flags]
+
+
 def rewrite_pauses_file():
   write_lines(PAUSE_FILE, ("%d,%d" % row for row in pauses))
 
@@ -1207,31 +1271,33 @@ def history_json(days, page):
   now_ts = utime.time()
   cutoff = now_ts - days * DAY_S
   window = [p for p in history if p[0] >= cutoff]
-  total = len(window)
+  include_fan = days * DAY_S <= FAN_KEEP_S
   if page is not None:
     page = max(0, page)
+    events = history_sample_events(window, cutoff, now_ts, include_fan)
+    total = len(events)
     # Newest first
     end = total - page * SAMPLE_PAGE
-    chunk = window[max(0, end - SAMPLE_PAGE):max(0, end)]
-    samples = [point_json(p) for p in reversed(chunk)]
+    chunk = events[max(0, end - SAMPLE_PAGE):max(0, end)]
+    samples = [sample_json(row) for row in reversed(chunk)]
     return {"days": days, "total": total, "page": page, "samples": samples}
+  total = len(window)
   pts = window
   if total > CHART_MAX_POINTS:
     pts = pts[::(total + CHART_MAX_POINTS - 1) // CHART_MAX_POINTS]
   # A window longer than the fan history would show only the recent slice.
   fan = None
-  if days * DAY_S <= FAN_KEEP_S:
-    runs = [r for r in fan_runs if r[1] >= cutoff]
-    if fan_run_start is not None:
-      runs.append((fan_run_start, now_ts, fan_run_manual))
+  if include_fan:
+    runs, open_start, open_manual = fan_runs_for_window(cutoff, now_ts)
+    if open_start is not None:
+      runs.append((open_start, now_ts, open_manual))
     fan = [[s + EPOCH_OFFSET_S, e + EPOCH_OFFSET_S, m] for s, e, m in runs]
   spans = [[s + EPOCH_OFFSET_S, e + EPOCH_OFFSET_S] for s, e in pause_spans(cutoff, now_ts)]
   return {"days": days, "count": total, "points": [point_json(p) for p in pts], "fan": fan, "pauses": spans}
 
 
-def delete_history_point(unix_ts):
+def delete_climate_at(device_ts):
   global history_stored_at
-  device_ts = int(unix_ts) - EPOCH_OFFSET_S
   kept = [p for p in history if p[0] != device_ts]
   if len(kept) == len(history):
     raise ValueError("Sample not found.")
@@ -1239,6 +1305,41 @@ def delete_history_point(unix_ts):
   if not history or history_stored_at == device_ts:
     history_stored_at = history[-1][0] if history else 0
   rewrite_history_file()
+
+
+def delete_fan_at(device_ts):
+  kept = [r for r in fan_runs if r[0] != device_ts and r[1] != device_ts]
+  if len(kept) == len(fan_runs):
+    if fan_run_start is not None and fan_run_start == device_ts:
+      raise ValueError("Active fan run cannot be deleted.")
+    raise ValueError("Fan run not found.")
+  fan_runs[:] = kept
+  rewrite_fan_runs_file()
+
+
+def delete_history_point(unix_ts, which=None):
+  # which is "climate", "fan", or None when only one record exists at ts.
+  device_ts = int(unix_ts) - EPOCH_OFFSET_S
+  has_climate = any(p[0] == device_ts for p in history)
+  has_fan = any(r[0] == device_ts or r[1] == device_ts for r in fan_runs)
+  if fan_run_start is not None and fan_run_start == device_ts:
+    has_fan = True
+  if which is None:
+    if has_climate and has_fan:
+      raise ValueError("Choose climate or fan.")
+    if has_climate:
+      which = "climate"
+    elif has_fan:
+      which = "fan"
+    else:
+      raise ValueError("Sample not found.")
+  which = str(which)
+  if which == "climate":
+    delete_climate_at(device_ts)
+  elif which == "fan":
+    delete_fan_at(device_ts)
+  else:
+    raise ValueError("Choose climate or fan.")
 
 
 def purge_history():
@@ -1943,7 +2044,7 @@ def api_settings(data, now):
 
 
 def api_history_delete(data, now):
-  delete_history_point(int(data["ts"]))
+  delete_history_point(int(data["ts"]), data.get("which"))
 
 
 def api_maintenance_delete(data, now):

@@ -164,7 +164,7 @@ button.x:hover{background:none;color:#c0392b}
     <div class="avg-tip">After 1 day: &#216; 1h &#183; 3 days: 4h &#183; 7 days: 12h &#183; Fan 7d</div>
   </div>
   <div id="samples" style="display:none">
-    <table><thead><tr><th>Time</th><th>Temperature</th><th>Humidity</th><th class="del"></th></tr></thead><tbody id="sampleRows"></tbody></table>
+    <table><thead><tr><th>Time</th><th>Temperature</th><th>Humidity</th><th>Fan</th><th class="del"></th></tr></thead><tbody id="sampleRows"></tbody></table>
     <div class="pager">
       <button type="button" class="secondary" id="samplePrev" onclick="sampleStep(-1)">Newer</button>
       <span id="samplePage" class="muted"></span>
@@ -244,6 +244,7 @@ let formLoaded = false, chartDays = 7, chartPoints = [], chartFan = [], chartPau
 let patterns = {}, tipPinned = false, samplesOpen = false, samplePage = 0, sampleTotal = 0;
 let maintEvents = [], maintPage = 0, logKey = '', maintKey = '', catKey = '', reading = false;
 const PAGE_SIZE = 50, MAINT_PAGE = 5;
+const SAMPLE_CLIMATE = 1, SAMPLE_FAN_EDGE = 2;
 function hatchPattern(ctx, cross) {
   const key = cross ? 'x' : 's';
   if (patterns[key]) return patterns[key];
@@ -513,6 +514,18 @@ function toggleSamples() {
   $('samples').style.display = samplesOpen ? '' : 'none';
   if (samplesOpen) { samplePage = 0; loadSamples(); }
 }
+function sampleHasClimate(p) { return (p[5] || SAMPLE_CLIMATE) & SAMPLE_CLIMATE; }
+function sampleHasFanEdge(p) { return (p[5] || 0) & SAMPLE_FAN_EDGE; }
+function sampleTempText(p) {
+  return sampleHasClimate(p) ? mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C' : '\u2014';
+}
+function sampleHumText(p) {
+  return sampleHasClimate(p) ? mark(p) + Number(p[2]).toFixed(1) + '%' : '\u2014';
+}
+function sampleFanText(p) {
+  if (chartDays > 7) return '\u2014';
+  return p[4] ? 'On' : 'Off';
+}
 async function loadSamples() {
   try {
     const h = JSON.parse(await req('/api/history?days=' + chartDays + '&page=' + samplePage));
@@ -521,14 +534,14 @@ async function loadSamples() {
     body.textContent = '';
     (h.samples || []).forEach(p => {
       const tr = document.createElement('tr');
-      [clock(p[0]), mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C', mark(p) + Number(p[2]).toFixed(1) + '%'].forEach(text => {
+      [clock(p[0]), sampleTempText(p), sampleHumText(p), sampleFanText(p)].forEach(text => {
         const td = document.createElement('td');
         td.textContent = text;
         tr.appendChild(td);
       });
       const del = document.createElement('td');
       del.className = 'del';
-      del.appendChild(deleteCross(() => confirmDelete(sampleLabel(p), () => removeSample(p))));
+      del.appendChild(deleteCross(() => askDeleteSample(p)));
       tr.appendChild(del);
       body.appendChild(tr);
     });
@@ -863,7 +876,10 @@ function deleteCross(action) {
   return b;
 }
 function sampleLabel(p) {
-  return clock(p[0]) + ' \u00b7 ' + mark(p) + Number(p[1]).toFixed(1) + ' \u00b0C \u00b7 ' + mark(p) + Number(p[2]).toFixed(1) + '%';
+  const bits = [clock(p[0])];
+  if (sampleHasClimate(p)) bits.push(sampleTempText(p), sampleHumText(p));
+  bits.push('Fan ' + sampleFanText(p).toLowerCase());
+  return bits.join(' \u00b7 ');
 }
 function maintLabel(ev) {
   const kind = ev[1] === 'note' ? 'Note' : ev[1];
@@ -891,9 +907,38 @@ function confirmDelete(message, action) {
   panel.appendChild(cancel);
   $('sheet').hidden = false;
 }
-async function removeSample(p) {
+function askDeleteSample(p) {
+  const hasC = sampleHasClimate(p), hasF = sampleHasFanEdge(p);
+  if (hasC && hasF) {
+    const panel = $('sheetPanel');
+    panel.textContent = '';
+    const note = document.createElement('div');
+    note.className = 'sheet-note';
+    note.textContent = 'Delete which record at ' + clock(p[0]) + '?';
+    panel.appendChild(note);
+    [['Temperature / humidity', 'climate'], ['Fan run', 'fan']].forEach(([label, which]) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'danger';
+      b.textContent = label;
+      b.onclick = () => { closeSheet(); removeSample(p, which); };
+      panel.appendChild(b);
+    });
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'secondary';
+    cancel.textContent = 'Cancel';
+    cancel.onclick = closeSheet;
+    panel.appendChild(cancel);
+    $('sheet').hidden = false;
+    return;
+  }
+  const which = hasF && !hasC ? 'fan' : 'climate';
+  confirmDelete(sampleLabel(p), () => removeSample(p, which));
+}
+async function removeSample(p, which) {
   try {
-    await post('/api/history-delete', {ts: p[0]});
+    await post('/api/history-delete', {ts: p[0], which: which});
     if (samplePage > 0 && sampleTotal <= samplePage * PAGE_SIZE + 1) samplePage -= 1;
     await loadHistory();
     if (samplesOpen) await loadSamples();
