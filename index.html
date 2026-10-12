@@ -923,7 +923,10 @@ function closeSheet() { $('sheet').hidden = true; }
 function openSheet(kind) {
   const panel = $('sheetPanel');
   panel.textContent = '';
-  [['Log', 'log'], ['Climate history', 'history'], ['Maintenance', 'maintenance'], ['All', 'all']].forEach(([label, which]) => {
+  const choices = kind === 'download'
+    ? [['Log', 'log'], ['Climate history', 'history'], ['Fan history', 'fan'], ['Maintenance', 'maintenance'], ['All', 'all']]
+    : [['Log', 'log'], ['Climate history', 'history'], ['Maintenance', 'maintenance'], ['All', 'all']];
+  choices.forEach(([label, which]) => {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = label;

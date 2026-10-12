@@ -1855,6 +1855,8 @@ def send_download(conn, which):
     send_attachment(conn, LOG_FILE, download_filename("events.log"))
   elif which == "maintenance":
     send_attachment(conn, MAINT_FILE, download_filename("maintenance.hist"))
+  elif which == "fan":
+    send_attachment(conn, FAN_HISTORY_FILE, download_filename("fan.hist"))
   elif which == "history":
     send_sections(conn, download_filename("climate.txt"), (
       (HISTORY_FILE, HISTORY_FILE),

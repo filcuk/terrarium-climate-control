@@ -182,6 +182,8 @@ def download_body(which):
         return log, download_filename("events.log")
     if which == "maintenance":
         return maint, download_filename("maintenance.hist")
+    if which == "fan":
+        return fan, download_filename("fan.hist")
     if which == "history":
         return "# climate.hist\n" + climate + "# fan.hist\n" + fan + "# pause.hist\n" + pause, download_filename("climate.txt")
     if which == "all":
