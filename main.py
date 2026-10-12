@@ -46,12 +46,18 @@ SENSOR_RETRY_MS = 30 * SECOND  # after a failed read; the AM2302 needs at least 
 DEFAULT_LOG_KEEP = 100
 MIN_LOG_KEEP = 20
 MAX_LOG_KEEP = 250
+# Daily board reset from Advanced. Default on at 03:00 local time.
+DEFAULT_DAILY_RESET = 1
+DEFAULT_DAILY_RESET_HOUR = 3
+DEFAULT_DAILY_RESET_MINUTE = 0
+DAILY_RESET_GRACE_MS = 5 * MINUTE
+DAILY_RESET_WINDOW_S = 60
 # Climate history is folded as it ages: raw, 1h, 4h, 12h, then dropped after 30 days.
 # 500 is only a guard. A 5-minute readout for 30 days is about 410 points.
 HISTORY_HARD_CAP = 500
 FAN_KEEP_S = 7 * DAY_S
 FAN_RUNS_MAX = 500  # guard for a stuck fan; a normal week stays well under this
-CHART_MAX_POINTS = 400
+CHART_MAX_POINTS = 200
 SAMPLE_PAGE = 50
 SLOT_S = 30 * 60
 N_SLOTS = 48
@@ -91,11 +97,29 @@ MAINT_FILE = "maintenance.hist"
 PAUSE_FILE = "pause.hist"
 PAGE_FILE = "index.html"
 PAGE_GZ = "index.html.gz"
+ICON_WEBP = "icon.webp"
+FAVICON_ICO = "favicon.ico"
+# Path -> (flash file, content type)
+STATIC_FILES = {
+  "/icon.webp": (ICON_WEBP, "image/webp"),
+  "/favicon.ico": (FAVICON_ICO, "image/x-icon"),
+}
 
 WEB_PORT = 80
 DEFAULT_HOSTNAME = "terrarium"  # reachable as http://terrarium.local/; override with hostname= in wifi.cfg
 WIFI_RETRY_MIN_MS = 30 * SECOND
 WIFI_RETRY_MAX_MS = 10 * MINUTE
+# Reach the gateway on TCP/53. Success or a quick refuse means the path is up;
+# a timeout means the STA/LWIP stack is wedged even if isconnected() is true.
+NET_HEALTH_MS = 5 * MINUTE
+NET_HEALTH_GRACE_MS = 2 * MINUTE
+NET_HEALTH_TIMEOUT_S = 2
+# After a failed probe: web restart, STA rejoin, then interface bounce.
+# Gaps let association settle before the next check. Three full cycles → reset.
+NET_RECOVER_GAP_MS = 30 * SECOND
+NET_RECOVER_BOUNCE_GAP_MS = 2 * MINUTE
+NET_RECOVER_MAX_CYCLES = 3
+NET_BOUNCE_OFF_MS = 500
 SEND_CHUNK = 1024
 
 # State Variables
@@ -105,6 +129,11 @@ log_keep = DEFAULT_LOG_KEEP
 maint_categories = list(DEFAULT_CATEGORIES)
 settings_timezone = ""  # empty: wifi.cfg timezone is used
 settings_tz_rejected = ""
+daily_reset_on = DEFAULT_DAILY_RESET == 1
+daily_reset_hour = DEFAULT_DAILY_RESET_HOUR
+daily_reset_minute = DEFAULT_DAILY_RESET_MINUTE
+daily_reset_done_day = -1  # local day index already handled
+boot_at = 0
 
 manual_start = 0
 manual_running = False
@@ -128,6 +157,16 @@ wifi_cfg = {}
 wifi_connected = False
 wifi_attempt_at = 0
 wifi_retry_ms = WIFI_RETRY_MIN_MS
+net_joined_at = 0
+net_health_at = 0
+# -1 = normal probing; 0/1/2 = waiting after web / rejoin / bounce recovery.
+net_recover_step = -1
+net_recover_cycles = 0
+net_recover_at = 0
+# History stays on flash until WiFi has joined (or a short offline wait), so the
+# driver still has a large free heap block while associating.
+history_loaded = False
+HISTORY_LOAD_WAIT_MS = 30 * SECOND
 device_ip = None
 hostname = None
 server = None
@@ -531,7 +570,7 @@ def purge_log():
 
 def load_settings():
   global sensor_interval_ms, log_keep, maint_categories, settings_timezone, settings_tz_rejected
-  global recording, pause_since
+  global recording, pause_since, daily_reset_on, daily_reset_hour, daily_reset_minute
   cfg = read_cfg(SETTINGS_CFG)
   # sensor_interval_s from older builds is ignored so a saved 10 seconds becomes 15 minutes
   interval = cfg_int(cfg, "sensor_interval_min", MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN,
@@ -546,6 +585,9 @@ def load_settings():
   settings_tz_rejected = name if name and name not in ZONES else ""
   settings_timezone = "" if settings_tz_rejected else name
   recording = cfg_int(cfg, "record", 0, 1, 1) == 1
+  daily_reset_on = cfg_int(cfg, "daily_reset", 0, 1, DEFAULT_DAILY_RESET) == 1
+  daily_reset_hour = cfg_int(cfg, "daily_reset_hour", 0, 23, DEFAULT_DAILY_RESET_HOUR)
+  daily_reset_minute = cfg_int(cfg, "daily_reset_minute", 0, 59, DEFAULT_DAILY_RESET_MINUTE)
   pause_since = 0
   if not recording:
     try:
@@ -567,6 +609,9 @@ def write_settings_file():
   parts.append("record=%d" % (1 if recording else 0))
   if not recording and pause_since:
     parts.append("pause_since=%d" % pause_since)
+  parts.append("daily_reset=%d" % (1 if daily_reset_on else 0))
+  parts.append("daily_reset_hour=%d" % daily_reset_hour)
+  parts.append("daily_reset_minute=%d" % daily_reset_minute)
   with open(SETTINGS_CFG, "w") as f:
     f.write("\n".join(parts) + "\n")
 
@@ -606,11 +651,15 @@ def ensure_pause_open():
     pass
 
 
-def save_settings(interval, keep, zone, categories, record):
+def save_settings(interval, keep, zone, categories, record, reset_on, reset_hour, reset_minute):
   global sensor_interval_ms, log_keep, sensor_due_at, maint_categories
+  global daily_reset_on, daily_reset_hour, daily_reset_minute, daily_reset_done_day
   check_range(interval, MIN_SENSOR_INTERVAL_MIN, MAX_SENSOR_INTERVAL_MIN, "Sensor interval (minutes)")
   check_range(keep, MIN_LOG_KEEP, MAX_LOG_KEEP, "Log lines kept")
   check_range(int(record), 0, 1, "Recording")
+  check_range(int(reset_on), 0, 1, "Daily reset")
+  check_range(int(reset_hour), 0, 23, "Daily reset hour")
+  check_range(int(reset_minute), 0, 59, "Daily reset minute")
   zone = str(zone).strip()
   if zone not in ZONES:
     raise ValueError("Unknown timezone.")
@@ -623,9 +672,43 @@ def save_settings(interval, keep, zone, categories, record):
   rewrite_log_file()
   maint_categories = names
   apply_settings_zone(zone)
+  daily_reset_on = int(reset_on) == 1
+  daily_reset_hour = int(reset_hour)
+  daily_reset_minute = int(reset_minute)
+  daily_reset_done_day = -1
   write_settings_file()
-  log("Settings changed: sensor every %d min, keep %d log lines, %d maintenance categories%s." % (
-    interval, keep, len(names), "" if recording else ", recording paused"))
+  if daily_reset_on:
+    reset_txt = ", daily reset at %02d:%02d" % (daily_reset_hour, daily_reset_minute)
+  else:
+    reset_txt = ", daily reset off"
+  log("Settings changed: sensor every %d min, keep %d log lines, %d maintenance categories%s%s." % (
+    interval, keep, len(names), "" if recording else ", recording paused", reset_txt))
+
+
+def daily_reset_poll(now):
+  # Local-time window once per day. Skip the first minutes after boot so a reset
+  # at 03:00 does not loop when the board comes back still inside that minute.
+  global daily_reset_done_day
+  if not daily_reset_on or not time_synced or boot_at == 0:
+    return
+  if utime.ticks_diff(now, boot_at) < DAILY_RESET_GRACE_MS:
+    return
+  _ts, local, _slot, _into = local_parts()
+  sec_day = int(local % DAY_S)
+  day = int(local) // DAY_S
+  if day == daily_reset_done_day:
+    return
+  target = daily_reset_hour * 3600 + daily_reset_minute * 60
+  if sec_day < target:
+    return
+  if sec_day >= target + DAILY_RESET_WINDOW_S:
+    # Booted after today's window; wait until tomorrow.
+    daily_reset_done_day = day
+    return
+  daily_reset_done_day = day
+  log("Scheduled daily reset at %02d:%02d." % (daily_reset_hour, daily_reset_minute))
+  fan_pin.value(0)
+  machine.reset()
 
 
 # ---------------------------------------------------------------- schedule
@@ -896,6 +979,9 @@ def status(now):
     "sensor_at": None if sensor_at is None else sensor_at + EPOCH_OFFSET_S,
     "sensor_interval_min": sensor_interval_ms // MINUTE,
     "record": 1 if recording else 0,
+    "daily_reset": 1 if daily_reset_on else 0,
+    "daily_reset_hour": daily_reset_hour,
+    "daily_reset_minute": daily_reset_minute,
     "humidity_limit": humidity_limit,
     "humidity_gate": humidity_gate,
     "humidity_hold": bool(in_slot and humidity_hold),
@@ -1079,6 +1165,70 @@ def point_json(p):
   return [p[0] + EPOCH_OFFSET_S, p[1] / 10, p[2] / 10, p[3]]
 
 
+# Sample row flags: climate reading and/or a fan start/end at this timestamp.
+SAMPLE_HAS_CLIMATE = 1
+SAMPLE_HAS_FAN_EDGE = 2
+
+
+def fan_on_at(ts, runs, open_start):
+  if open_start is not None and open_start <= ts:
+    return 1
+  for start, end, _manual in runs:
+    if start <= ts < end:
+      return 1
+  return 0
+
+
+def fan_runs_for_window(cutoff, now_ts):
+  runs = [r for r in fan_runs if r[1] >= cutoff]
+  open_start = None
+  open_manual = 0
+  if fan_run_start is not None and fan_run_start >= cutoff:
+    open_start = fan_run_start
+    open_manual = fan_run_manual
+  return runs, open_start, open_manual
+
+
+def history_sample_events(window, cutoff, now_ts, include_fan):
+  # Ascending (device_ts, climate_point_or_None, fan_on, flags).
+  runs = []
+  open_start = None
+  if include_fan:
+    runs, open_start, _m = fan_runs_for_window(cutoff, now_ts)
+  edges = {}
+  if include_fan:
+    for start, end, _manual in runs:
+      if start >= cutoff:
+        edges[start] = 1
+      if end >= cutoff:
+        edges[end] = 0
+    if open_start is not None:
+      edges[open_start] = 1
+  events = []
+  for p in window:
+    ts = p[0]
+    if ts in edges:
+      fan = edges.pop(ts)
+      events.append((ts, p, fan, SAMPLE_HAS_CLIMATE | SAMPLE_HAS_FAN_EDGE))
+    else:
+      fan = fan_on_at(ts, runs, open_start) if include_fan else 0
+      events.append((ts, p, fan, SAMPLE_HAS_CLIMATE))
+  for ts, fan in edges.items():
+    events.append((ts, None, fan, SAMPLE_HAS_FAN_EDGE))
+  # Fan-only stamps may sit between climate points; keep time order.
+  if edges:
+    events.sort(key=lambda row: row[0])
+  return events
+
+
+def sample_json(row):
+  ts, point, fan, flags = row
+  unix = ts + EPOCH_OFFSET_S
+  if point is None:
+    return [unix, None, None, 0, fan, flags]
+  return [unix, point[1] / 10, point[2] / 10, point[3], fan, flags]
+
+
 def rewrite_pauses_file():
   write_lines(PAUSE_FILE, ("%d,%d" % row for row in pauses))
 
@@ -1132,31 +1282,33 @@ def history_json(days, page):
   now_ts = utime.time()
   cutoff = now_ts - days * DAY_S
   window = [p for p in history if p[0] >= cutoff]
-  total = len(window)
+  include_fan = days * DAY_S <= FAN_KEEP_S
   if page is not None:
     page = max(0, page)
+    events = history_sample_events(window, cutoff, now_ts, include_fan)
+    total = len(events)
     # Newest first
     end = total - page * SAMPLE_PAGE
-    chunk = window[max(0, end - SAMPLE_PAGE):max(0, end)]
-    samples = [point_json(p) for p in reversed(chunk)]
+    chunk = events[max(0, end - SAMPLE_PAGE):max(0, end)]
+    samples = [sample_json(row) for row in reversed(chunk)]
     return {"days": days, "total": total, "page": page, "samples": samples}
+  total = len(window)
   pts = window
   if total > CHART_MAX_POINTS:
     pts = pts[::(total + CHART_MAX_POINTS - 1) // CHART_MAX_POINTS]
   # A window longer than the fan history would show only the recent slice.
   fan = None
-  if days * DAY_S <= FAN_KEEP_S:
-    runs = [r for r in fan_runs if r[1] >= cutoff]
-    if fan_run_start is not None:
-      runs.append((fan_run_start, now_ts, fan_run_manual))
+  if include_fan:
+    runs, open_start, open_manual = fan_runs_for_window(cutoff, now_ts)
+    if open_start is not None:
+      runs.append((open_start, now_ts, open_manual))
     fan = [[s + EPOCH_OFFSET_S, e + EPOCH_OFFSET_S, m] for s, e, m in runs]
   spans = [[s + EPOCH_OFFSET_S, e + EPOCH_OFFSET_S] for s, e in pause_spans(cutoff, now_ts)]
   return {"days": days, "count": total, "points": [point_json(p) for p in pts], "fan": fan, "pauses": spans}
 
 
-def delete_history_point(unix_ts):
+def delete_climate_at(device_ts):
   global history_stored_at
-  device_ts = int(unix_ts) - EPOCH_OFFSET_S
   kept = [p for p in history if p[0] != device_ts]
   if len(kept) == len(history):
     raise ValueError("Sample not found.")
@@ -1164,6 +1316,52 @@ def delete_history_point(unix_ts):
   if not history or history_stored_at == device_ts:
     history_stored_at = history[-1][0] if history else 0
   rewrite_history_file()
+
+
+def fan_run_matches(device_ts, start, end):
+  # Start/end edge, or a climate sample taken while the run was on.
+  return start == device_ts or end == device_ts or (start <= device_ts < end)
+
+
+def delete_fan_at(device_ts):
+  if fan_run_start is not None and fan_run_start <= device_ts:
+    raise ValueError("Active fan run cannot be deleted.")
+  kept = []
+  removed = False
+  for run in fan_runs:
+    if not removed and fan_run_matches(device_ts, run[0], run[1]):
+      removed = True
+      continue
+    kept.append(run)
+  if not removed:
+    raise ValueError("Fan run not found.")
+  fan_runs[:] = kept
+  rewrite_fan_runs_file()
+
+
+def delete_history_point(unix_ts, which=None):
+  # which is "climate", "fan", or None when only one record exists at ts.
+  device_ts = int(unix_ts) - EPOCH_OFFSET_S
+  has_climate = any(p[0] == device_ts for p in history)
+  has_fan = any(fan_run_matches(device_ts, r[0], r[1]) for r in fan_runs)
+  if fan_run_start is not None and fan_run_start <= device_ts:
+    has_fan = True
+  if which is None:
+    if has_climate and has_fan:
+      raise ValueError("Choose climate or fan.")
+    if has_climate:
+      which = "climate"
+    elif has_fan:
+      which = "fan"
+    else:
+      raise ValueError("Sample not found.")
+  which = str(which)
+  if which == "climate":
+    delete_climate_at(device_ts)
+  elif which == "fan":
+    delete_fan_at(device_ts)
+  else:
+    raise ValueError("Choose climate or fan.")
 
 
 def purge_history():
@@ -1395,17 +1593,10 @@ def log_memory():
     gc.mem_free(), gc.mem_alloc(), len(history), len(fan_runs), len(log_lines), len(maintenance)))
 
 
-def wifi_start(now):
-  global wlan, wifi_cfg, hostname
-  wifi_cfg = read_cfg(WIFI_CFG)
-  apply_zone(wifi_cfg)
-  if settings_timezone:
-    apply_settings_zone(settings_timezone)
-  if not wifi_cfg.get("ssid"):
-    log("WiFi: no %s with ssid=... found, web interface disabled." % WIFI_CFG)
-    return
+def wifi_set_hostname():
   # Hostname must be set before the interface comes up; the ESP32 port's mDNS
   # responder then answers for <hostname>.local
+  global hostname
   name = wifi_cfg.get("hostname", DEFAULT_HOSTNAME)
   hostname = None
   try:
@@ -1413,6 +1604,18 @@ def wifi_start(now):
     hostname = name
   except (ValueError, OSError):
     log("WiFi: could not set hostname '%s'; use the IP address instead." % name)
+
+
+def wifi_start(now):
+  global wlan, wifi_cfg
+  wifi_cfg = read_cfg(WIFI_CFG)
+  apply_zone(wifi_cfg)
+  if settings_timezone:
+    apply_settings_zone(settings_timezone)
+  if not wifi_cfg.get("ssid"):
+    log("WiFi: no %s with ssid=... found, web interface disabled." % WIFI_CFG)
+    return
+  wifi_set_hostname()
   gc.collect()
   try:
     wlan = network.WLAN(network.STA_IF)
@@ -1458,32 +1661,223 @@ def clock_poll(now):
     sync_time(now)
 
 
+def net_health_ok():
+  # True when the board can still talk to the LAN gateway. Do not connect to our
+  # own :80 here: this loop cannot accept while blocked in connect.
+  try:
+    _ip, _mask, gw, _dns = wlan.ifconfig()
+  except OSError:
+    return False
+  if not gw or gw == "0.0.0.0":
+    return False
+  s = None
+  try:
+    s = socket.socket()
+    s.settimeout(NET_HEALTH_TIMEOUT_S)
+    s.connect(socket.getaddrinfo(gw, 53)[0][-1])
+    return True
+  except OSError as e:
+    # Refused/reset still means L3 works. Timeout means a dead path.
+    code = e.args[0] if e.args else 0
+    if code in (110, 116):
+      return False
+    msg = str(e).lower()
+    if "timed out" in msg or "timeout" in msg:
+      return False
+    return True
+  finally:
+    if s is not None:
+      try:
+        s.close()
+      except OSError:
+        pass
+
+
+def net_health_diag():
+  # One line for events.log when the path looks dead.
+  parts = ["Network: health check failed"]
+  try:
+    parts.append("connected=%s" % wlan.isconnected())
+  except OSError:
+    pass
+  try:
+    parts.append("status=%s" % wlan.status())
+  except (OSError, TypeError, AttributeError):
+    pass
+  try:
+    parts.append("rssi=%s" % wlan.status("rssi"))
+  except (OSError, TypeError, AttributeError, ValueError):
+    pass
+  try:
+    ip, _mask, gw, _dns = wlan.ifconfig()
+    parts.append("ip=%s" % ip)
+    parts.append("gw=%s" % gw)
+  except OSError:
+    pass
+  parts.append("mem_free=%d" % gc.mem_free())
+  log(" ".join(parts))
+
+
+def net_recover_run(now, step):
+  # 0 = rebind HTTP, 1 = STA rejoin, 2 = radio bounce + hostname (mDNS) refresh.
+  global wifi_connected
+  if step == 0:
+    log("Network: recovering (web)...")
+    web_stop()
+    if wlan.isconnected():
+      web_start()
+    return
+  if step == 1:
+    log("Network: recovering (rejoin)...")
+    web_stop()
+    wifi_connected = False
+    wifi_connect(now)
+    return
+  log("Network: recovering (bounce)...")
+  web_stop()
+  wifi_connected = False
+  try:
+    wlan.active(False)
+  except OSError:
+    pass
+  utime.sleep_ms(NET_BOUNCE_OFF_MS)
+  gc.collect()
+  wifi_set_hostname()
+  try:
+    wlan.active(True)
+  except OSError as e:
+    log("Network: bounce failed (%s)." % e)
+    return
+  wifi_connect(now)
+
+
+def net_recover_begin(now):
+  global net_recover_step, net_recover_at
+  net_recover_run(now, 0)
+  net_recover_step = 0
+  net_recover_at = now
+
+
+def net_recover_poll(now):
+  # After each recovery action, wait, re-probe, then escalate or reset.
+  global net_recover_step, net_recover_cycles, net_recover_at, net_health_at
+  gap = NET_RECOVER_BOUNCE_GAP_MS if net_recover_step == 2 else NET_RECOVER_GAP_MS
+  if utime.ticks_diff(now, net_recover_at) < gap:
+    return
+  if net_recover_step >= 1:
+    if not wlan.isconnected():
+      if utime.ticks_diff(now, net_recover_at) < gap + NET_HEALTH_GRACE_MS:
+        return
+    elif utime.ticks_diff(now, net_joined_at) < NET_HEALTH_GRACE_MS:
+      return
+  if net_health_ok():
+    names = ("web", "rejoin", "bounce")
+    log("Network: recovered after %s." % names[net_recover_step])
+    net_recover_step = -1
+    net_recover_cycles = 0
+    net_health_at = now
+    return
+  if net_recover_step == 0:
+    net_recover_run(now, 1)
+    net_recover_step = 1
+    net_recover_at = now
+    return
+  if net_recover_step == 1:
+    net_recover_run(now, 2)
+    net_recover_step = 2
+    net_recover_at = now
+    return
+  net_recover_cycles += 1
+  log("Network: recovery cycle %d/%d failed." % (net_recover_cycles, NET_RECOVER_MAX_CYCLES))
+  if net_recover_cycles >= NET_RECOVER_MAX_CYCLES:
+    log("Network: still unreachable; resetting.")
+    fan_pin.value(0)
+    machine.reset()
+  net_recover_run(now, 0)
+  net_recover_step = 0
+  net_recover_at = now
+
+
+def net_health_poll(now):
+  # Probe on a slow interval after join grace; escalate when the path is dead.
+  global net_health_at
+  if net_recover_step >= 0:
+    net_recover_poll(now)
+    return
+  if utime.ticks_diff(now, net_joined_at) < NET_HEALTH_GRACE_MS:
+    return
+  if utime.ticks_diff(now, net_health_at) < NET_HEALTH_MS:
+    return
+  net_health_at = now
+  if not net_health_ok():
+    net_health_diag()
+    net_recover_begin(now)
+
+
+def load_runtime_data():
+  # Climate/fan/maintenance from flash. Deferred until after WiFi joins.
+  global history_loaded, mem_logged_at
+  if history_loaded:
+    return
+  load_history()
+  load_fan_runs()
+  load_maintenance()
+  load_pauses()
+  gc.collect()
+  log_memory()
+  mem_logged_at = utime.ticks_ms()
+  history_loaded = True
+  log("History loaded.")
+
+
 def wifi_poll(now):
-  global wifi_connected, device_ip, wifi_retry_ms
+  global wifi_connected, device_ip, wifi_retry_ms, net_joined_at, net_health_at
   if wlan is None:
     return
   if wlan.isconnected():
     if not wifi_connected:
       wifi_connected = True
       wifi_retry_ms = WIFI_RETRY_MIN_MS
+      net_joined_at = now
+      net_health_at = now
       device_ip = wlan.ifconfig()[0]
       if not time_synced:
         sync_time(now)
       log("WiFi: connected. Device IP: %s  ->  http://%s/" % (device_ip, device_ip))
       if hostname:
         log("Web: also at http://%s.local/" % hostname)
+      gc.collect()
       web_start()
+      load_runtime_data()
+    else:
+      net_health_poll(now)
   elif wifi_connected:
     wifi_connected = False
+    # Drop the listen socket so the next join rebinds instead of keeping a stale one.
+    web_stop()
     log("WiFi: connection lost, reconnecting...")
     wifi_connect(now)
   elif utime.ticks_diff(now, wifi_attempt_at) >= wifi_retry_ms:
     log("WiFi: not connected yet, retrying (next retry in %s)." % fmt_duration(wifi_retry_ms))
     wifi_retry_ms = min(wifi_retry_ms * 2, WIFI_RETRY_MAX_MS)
     wifi_connect(now)
+  if net_recover_step >= 0 and not wifi_connected:
+    # Rejoin/bounce left us offline; keep the ladder moving on its gaps.
+    net_recover_poll(now)
 
 
 # ---------------------------------------------------------------- web
+
+def web_stop():
+  global server
+  if server is None:
+    return
+  try:
+    server.close()
+  except OSError:
+    pass
+  server = None
+
 
 def web_start():
   global server
@@ -1494,7 +1888,7 @@ def web_start():
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind(addr)
-    s.listen(2)
+    s.listen(4)
     s.setblocking(False)
     server = s
   except OSError as e:
@@ -1516,7 +1910,11 @@ def send(conn, status_line, content_type, body):
 
 
 def send_json(conn, data):
-  send(conn, "200 OK", "application/json", json.dumps(data))
+  gc.collect()
+  body = json.dumps(data)
+  send(conn, "200 OK", "application/json", body)
+  body = None
+  gc.collect()
 
 
 def file_size_mtime(path):
@@ -1525,6 +1923,15 @@ def file_size_mtime(path):
   except OSError:
     return None
   return st[6], st[8]
+
+
+def send_static(conn, path, content_type):
+  info = file_size_mtime(path)
+  if not info:
+    send(conn, "404 Not Found", "text/plain", "%s is missing." % path)
+    return
+  send_head(conn, "200 OK", content_type, info[0])
+  stream_file(conn, path)
 
 
 def send_page(conn):
@@ -1539,13 +1946,7 @@ def send_page(conn):
     send(conn, "404 Not Found", "text/plain", "%s is missing. Copy it to the board next to main.py." % PAGE_FILE)
     return
   send_head(conn, "200 OK", "text/html; charset=utf-8", size, extra)
-  view = memoryview(send_buf)
-  with open(path, "rb") as f:
-    while True:
-      n = f.readinto(send_buf)
-      if not n:
-        break
-      conn.sendall(view[:n])
+  stream_file(conn, path)
 
 
 def stream_file(conn, path):
@@ -1602,6 +2003,8 @@ def send_download(conn, which):
     send_attachment(conn, LOG_FILE, download_filename("events.log"))
   elif which == "maintenance":
     send_attachment(conn, MAINT_FILE, download_filename("maintenance.hist"))
+  elif which == "fan":
+    send_attachment(conn, FAN_HISTORY_FILE, download_filename("fan.hist"))
   elif which == "history":
     send_sections(conn, download_filename("climate.txt"), (
       (HISTORY_FILE, HISTORY_FILE),
@@ -1681,11 +2084,14 @@ def api_schedule(data, now):
 def api_settings(data, now):
   save_settings(int(data["sensor_interval_min"]), int(data["log_keep"]),
                 str(data["timezone"]), str(data.get("maint_categories", "")),
-                int(data.get("record", 1)))
+                int(data.get("record", 1)),
+                int(data.get("daily_reset", DEFAULT_DAILY_RESET)),
+                int(data.get("daily_reset_hour", DEFAULT_DAILY_RESET_HOUR)),
+                int(data.get("daily_reset_minute", DEFAULT_DAILY_RESET_MINUTE)))
 
 
 def api_history_delete(data, now):
-  delete_history_point(int(data["ts"]))
+  delete_history_point(int(data["ts"]), data.get("which"))
 
 
 def api_maintenance_delete(data, now):
@@ -1724,12 +2130,19 @@ def handle(conn, method, path, qs, body, ctype, now):
   if method == "GET":
     if path == "/":
       send_page(conn)
+    elif path in STATIC_FILES:
+      send_static(conn, STATIC_FILES[path][0], STATIC_FILES[path][1])
     elif path == "/api/status":
       send_json(conn, status(now))
     elif path == "/api/logs":
-      send(conn, "200 OK", "text/plain; charset=utf-8", "\n".join(log_lines))
+      gc.collect()
+      body = "\n".join(log_lines)
+      send(conn, "200 OK", "text/plain; charset=utf-8", body)
+      body = None
+      gc.collect()
     elif path == "/api/history":
       page = query_int(qs, "page", 0) if "page=" in qs else None
+      gc.collect()
       send_json(conn, history_json(query_int(qs, "days", 7), page))
     elif path == "/api/maintenance":
       send_json(conn, maintenance_json())
@@ -1779,6 +2192,7 @@ def web_poll(now):
       pass
   finally:
     conn.close()
+    gc.collect()
 
 
 # ---------------------------------------------------------------- boot
@@ -1807,24 +2221,25 @@ _cause = machine.reset_cause()
 log("Terrarium Climate Controller starting (ESP32-C3), reset cause: %s" % RESET_CAUSE_NAMES.get(_cause, _cause))
 log("Pins: fan=GPIO%d  button=GPIO%d  sensor=GPIO%d" % (FAN_GPIO, BTN_GPIO, DHT_GPIO))
 log("Schedule: %s" % schedule_text())
-log("Settings: sensor every %d min, keep %d log lines%s." % (
-  sensor_interval_ms // MINUTE, log_keep, "" if recording else ", recording paused"))
+if daily_reset_on:
+  _reset_txt = ", daily reset at %02d:%02d" % (daily_reset_hour, daily_reset_minute)
+else:
+  _reset_txt = ", daily reset off"
+log("Settings: sensor every %d min, keep %d log lines%s%s." % (
+  sensor_interval_ms // MINUTE, log_keep, "" if recording else ", recording paused", _reset_txt))
 
 button_start()
 sensor_start()
-# WiFi needs one large free block, so the history files stay unloaded until
-# after the join. Reading flash while it is associating stalls the radio on
-# this single-core chip, and the join then waits until the next retry.
+# WiFi needs one large free block, so history stays on flash until the join
+# finishes (see load_runtime_data). Flash reads during association stall the
+# radio on this single-core chip and leave the heap too tight for the stack.
 wifi_start(utime.ticks_ms())
 
 print("Waiting %s before enabling the fan..." % fmt_duration(STARTUP_DELAY_MS))
 utime.sleep_ms(STARTUP_DELAY_MS)
-load_history()
-load_fan_runs()
-load_maintenance()
-load_pauses()
+boot_at = utime.ticks_ms()
+mem_logged_at = boot_at
 log_memory()
-mem_logged_at = utime.ticks_ms()
 log("Controller ready.")
 
 
@@ -1835,10 +2250,15 @@ def control_step(now):
 
   refresh_tz()
   wifi_poll(now)
+  # No wifi.cfg: load history after a short wait so the fan schedule still works.
+  if (not history_loaded and wlan is None and
+      utime.ticks_diff(now, boot_at) >= HISTORY_LOAD_WAIT_MS):
+    load_runtime_data()
   clock_poll(now)
   ensure_pause_open()
   sensor_poll(now)
-  if utime.ticks_diff(now, mem_logged_at) >= MEM_LOG_MS:
+  daily_reset_poll(now)
+  if history_loaded and utime.ticks_diff(now, mem_logged_at) >= MEM_LOG_MS:
     log_memory()
     mem_logged_at = now
 

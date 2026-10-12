@@ -32,6 +32,26 @@ def _read_hist(name):
     return rows
 
 
+def _synthetic_climate(start, end):
+    """Age-tiered fake readings from start (inclusive) up to end (exclusive)."""
+    raw = []
+    t = start
+    while t < end:
+        age = end - t
+        if age > 7 * DAY:
+            step, span = 12 * 3600, 12 * 3600
+        elif age > 3 * DAY:
+            step, span = 4 * 3600, 4 * 3600
+        elif age > DAY:
+            step, span = 3600, 3600
+        else:
+            step, span = 15 * 60, 0
+        temp = 23 + (t % 86400) / 86400 * 2
+        raw.append((t, round(temp, 1), round(55 - (t % 86400) / 86400 * 8, 1), span))
+        t += step
+    return raw
+
+
 def climate_points(now):
     """Browser timestamps. span 0 is a raw reading; larger spans are averages."""
     raw = []
@@ -44,21 +64,7 @@ def climate_points(now):
         except ValueError:
             continue
     if not raw:
-        t = now - 30 * DAY
-        while t < now:
-            age = now - t
-            if age > 7 * DAY:
-                step, span = 12 * 3600, 12 * 3600
-            elif age > 3 * DAY:
-                step, span = 4 * 3600, 4 * 3600
-            elif age > DAY:
-                step, span = 3600, 3600
-            else:
-                step, span = 15 * 60, 0
-            temp = 23 + (t % 86400) / 86400 * 2
-            raw.append((t, round(temp, 1), round(55 - (t % 86400) / 86400 * 8, 1), span))
-            t += step
-        return raw
+        return _synthetic_climate(now - 30 * DAY, now)
     first = raw[0][0]
     older = []
     t = first - 30 * DAY
@@ -73,7 +79,11 @@ def climate_points(now):
         older.append((t, 22.5, 60.0, span))
         t += step
     points = older + [(ts, temp, hum, 0) for ts, temp, hum in raw]
-    return [p for p in points if now - p[0] <= 30 * DAY]
+    points = [p for p in points if now - p[0] <= 30 * DAY]
+    # A stale device/climate.hist dump leaves the 7-day window empty; fill to now.
+    if points and now - points[-1][0] > 3600:
+        points = points + _synthetic_climate(points[-1][0] + 15 * 60, now)
+    return points
 
 
 def fan_runs(now):
@@ -88,8 +98,20 @@ def fan_runs(now):
         if now - end <= 7 * DAY:
             runs.append([start, end, manual])
     if not runs:
-        runs.append([now - 3 * 3600, now - 3 * 3600 + 6 * 3600, 0])
-        runs.append([now - 26 * 3600, now - 26 * 3600 + 8 * 60, 1])
+        # Synthetic week of runs for the samples UI: scheduled half-hours,
+        # short on-demand taps, and edges that fall between 15-minute readings.
+        runs = [
+            [now - 45 * 60, now - 45 * 60 + 8 * 60, 1],           # on-demand, recent
+            [now - 2 * 3600 - 7 * 60, now - 2 * 3600 + 23 * 60, 0],  # scheduled, mid-slot edges
+            [now - 5 * 3600, now - 5 * 3600 + 30 * 60, 0],
+            [now - 9 * 3600 - 3 * 60, now - 9 * 3600 + 12 * 60, 1],
+            [now - 26 * 3600, now - 26 * 3600 + 8 * 60, 1],
+            [now - 2 * DAY - 4 * 3600, now - 2 * DAY - 4 * 3600 + 30 * 60, 0],
+            [now - 3 * DAY - 10 * 60, now - 3 * DAY + 20 * 60, 0],
+            [now - 4 * DAY - 2 * 3600, now - 4 * DAY - 2 * 3600 + 15 * 60, 1],
+            [now - 5 * DAY, now - 5 * DAY + 30 * 60, 0],
+            [now - 6 * DAY - 90 * 60, now - 6 * DAY - 90 * 60 + 30 * 60, 0],
+        ]
     return runs
 
 
@@ -107,6 +129,9 @@ PAUSE_SINCE = 0
 PAUSES = []
 HUMIDITY_LIMIT = 0
 HUMIDITY_GATE = 5
+DAILY_RESET = 1
+DAILY_RESET_HOUR = 3
+DAILY_RESET_MINUTE = 0
 
 
 def ensure_data():
@@ -117,6 +142,12 @@ def ensure_data():
         FANS = fan_runs(now)
         SAMPLE_PAUSE = (now - 20 * 3600, now - 18 * 3600)
         POINTS = [p for p in POINTS if p[0] < SAMPLE_PAUSE[0] or p[0] > SAMPLE_PAUSE[1]]
+        # Land one fan start on a climate timestamp so a flags=both row exists too.
+        if POINTS and FANS:
+            climate_ts = set(int(p[0]) for p in POINTS)
+            if int(FANS[0][0]) not in climate_ts:
+                anchor = int(POINTS[-3][0]) if len(POINTS) >= 3 else int(POINTS[-1][0])
+                FANS[0] = [anchor, anchor + 8 * 60, int(FANS[0][2])]
         MAINT = [
             [now - 2 * 3600, "Mist", ""],
             [now - 26 * 3600, "Feed", ""],
@@ -179,6 +210,8 @@ def download_body(which):
         return log, download_filename("events.log")
     if which == "maintenance":
         return maint, download_filename("maintenance.hist")
+    if which == "fan":
+        return fan, download_filename("fan.hist")
     if which == "history":
         return "# climate.hist\n" + climate + "# fan.hist\n" + fan + "# pause.hist\n" + pause, download_filename("climate.txt")
     if which == "all":
@@ -219,6 +252,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             self._send(200, "text/html; charset=utf-8", page_html())
             return
+        if path == "/icon.webp":
+            data = (ROOT / "res" / "icon.webp").read_bytes()
+            self._send(200, "image/webp", data)
+            return
+        if path == "/favicon.ico":
+            data = (ROOT / "res" / "favicon.ico").read_bytes()
+            self._send(200, "image/x-icon", data)
+            return
         if path == "/api/status":
             self._send(200, "application/json", json.dumps(status_body()))
             return
@@ -244,8 +285,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, "text/plain", "Not found")
 
     def do_POST(self):
-        global MAINT_REV, CATEGORIES, PREVIEW_TZ, SENSOR_AT, POINTS
+        global MAINT_REV, CATEGORIES, PREVIEW_TZ, SENSOR_AT, POINTS, FANS
         global RECORDING, PAUSE_SINCE, PAUSES, SAMPLE_PAUSE, HUMIDITY_LIMIT, HUMIDITY_GATE
+        global DAILY_RESET, DAILY_RESET_HOUR, DAILY_RESET_MINUTE
         ensure_data()
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -297,6 +339,19 @@ class Handler(BaseHTTPRequestHandler):
                 record = int(data.get("record", 1))
             except (TypeError, ValueError):
                 record = 1
+            try:
+                daily_reset = int(data.get("daily_reset", 1))
+                daily_reset_hour = int(data.get("daily_reset_hour", 3))
+                daily_reset_minute = int(data.get("daily_reset_minute", 0))
+            except (TypeError, ValueError):
+                self._send(400, "text/plain", "Invalid daily reset.")
+                return
+            if daily_reset not in (0, 1) or not 0 <= daily_reset_hour <= 23 or not 0 <= daily_reset_minute <= 59:
+                self._send(400, "text/plain", "Invalid daily reset.")
+                return
+            DAILY_RESET = daily_reset
+            DAILY_RESET_HOUR = daily_reset_hour
+            DAILY_RESET_MINUTE = daily_reset_minute
             now = int(time.time())
             if record:
                 if not RECORDING and PAUSE_SINCE:
@@ -338,11 +393,39 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 self._send(400, "text/plain", "Sample not found.")
                 return
-            kept = [p for p in POINTS if int(p[0]) != ts]
-            if len(kept) == len(POINTS):
+            which = data.get("which")
+
+            def fan_match(start, end):
+                return start == ts or end == ts or (start <= ts < end)
+
+            has_climate = any(int(p[0]) == ts for p in POINTS)
+            has_fan = any(fan_match(int(r[0]), int(r[1])) for r in FANS)
+            if which is None:
+                if has_climate and has_fan:
+                    self._send(400, "text/plain", "Choose climate or fan.")
+                    return
+                which = "climate" if has_climate else "fan" if has_fan else None
+            if which == "climate":
+                kept = [p for p in POINTS if int(p[0]) != ts]
+                if len(kept) == len(POINTS):
+                    self._send(400, "text/plain", "Sample not found.")
+                    return
+                POINTS = kept
+            elif which == "fan":
+                kept = []
+                removed = False
+                for r in FANS:
+                    if not removed and fan_match(int(r[0]), int(r[1])):
+                        removed = True
+                        continue
+                    kept.append(r)
+                if not removed:
+                    self._send(400, "text/plain", "Fan run not found.")
+                    return
+                FANS = kept
+            else:
                 self._send(400, "text/plain", "Sample not found.")
                 return
-            POINTS = kept
             self._send(200, "application/json", json.dumps(status_body()))
             return
         if path == "/api/maintenance-delete":
@@ -433,6 +516,9 @@ def status_body():
         "sensor_at": SENSOR_AT,
         "sensor_interval_min": 15,
         "record": 0 if not RECORDING else 1,
+        "daily_reset": DAILY_RESET,
+        "daily_reset_hour": DAILY_RESET_HOUR,
+        "daily_reset_minute": DAILY_RESET_MINUTE,
         "humidity_limit": HUMIDITY_LIMIT,
         "humidity_gate": HUMIDITY_GATE,
         "humidity_hold": held,
@@ -451,6 +537,38 @@ def status_body():
     }
 
 
+def preview_sample_events(window, cutoff, include_fan):
+    runs = [r for r in FANS if r[1] >= cutoff] if include_fan else []
+    edges = {}
+    if include_fan:
+        for start, end, _manual in runs:
+            if start >= cutoff:
+                edges[start] = 1
+            if end >= cutoff:
+                edges[end] = 0
+
+    def fan_on_at(ts):
+        for start, end, _manual in runs:
+            if start <= ts < end:
+                return 1
+        return 0
+
+    events = []
+    for p in window:
+        ts = int(p[0])
+        if ts in edges:
+            fan = edges.pop(ts)
+            events.append([ts, p[1], p[2], p[3] if len(p) > 3 else 0, fan, 3])
+        else:
+            fan = fan_on_at(ts) if include_fan else 0
+            events.append([ts, p[1], p[2], p[3] if len(p) > 3 else 0, fan, 1])
+    for ts, fan in edges.items():
+        events.append([ts, None, None, 0, fan, 2])
+    if edges:
+        events.sort(key=lambda row: row[0])
+    return events
+
+
 def history_body(qs):
     try:
         days = int(qs.get("days", "7"))
@@ -461,25 +579,27 @@ def history_body(qs):
     now = int(time.time())
     cutoff = now - days * DAY
     window = [p for p in POINTS if p[0] >= cutoff]
+    include_fan = days <= 7
     if "page" in qs:
         try:
             page = max(0, int(qs.get("page", "0")))
         except ValueError:
             page = 0
-        rows = list(reversed(window))
+        events = preview_sample_events(window, cutoff, include_fan)
+        rows = list(reversed(events))
         chunk = rows[page * 50:(page + 1) * 50]
         return {
             "days": days,
             "total": len(rows),
             "page": page,
-            "samples": [list(p) for p in chunk],
+            "samples": chunk,
         }
     pts = window
-    if len(pts) > 400:
-        step = (len(pts) + 399) // 400
+    if len(pts) > 200:
+        step = (len(pts) + 199) // 200
         pts = pts[::step]
     fan = None
-    if days <= 7:
+    if include_fan:
         fan = [r for r in FANS if r[1] >= cutoff]
     pauses = []
     if SAMPLE_PAUSE and SAMPLE_PAUSE[1] > cutoff:

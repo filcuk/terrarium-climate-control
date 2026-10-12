@@ -60,22 +60,47 @@ python -m pip install -r requirements.txt
 python build.py
 ```
 
-4. Copy `dist/*` to the board (Thonny, `mpremote`, etc.).
-  ```bash
-  mpremote connect auto cp dist/main.py :main.py
-  mpremote connect auto cp dist/terrarium.mpy :terrarium.mpy
-  mpremote connect auto cp dist/index.html :index.html
-  mpremote connect auto cp dist/index.html.gz :index.html.gz
-  mpremote connect auto cp wifi.cfg :wifi.cfg
-  mpremote connect auto reset
-  ```
-5. Reset the board. Once it's on WiFi, the log shows the address & IP.
-6. Open that address in a browser on the same network.
+4. With the board plugged in over USB, find it with `mpremote` (installed by `requirements.txt` in step 2):
+
+```bash
+mpremote connect list
+```
+
+`connect auto` picks the first suitable serial port. If you have more than one device, use the port from the list instead (for example `COM5` on Windows, `/dev/ttyACM0` on Linux):
+
+```bash
+mpremote connect auto
+# or: mpremote connect COM5
+```
+
+5. Copy `dist/*` to the board (Thonny, `mpremote`, etc.). Use the same port as in step 4 (`auto` or an explicit name):
+
+```bash
+mpremote connect auto cp dist/main.py :main.py
+mpremote connect auto cp dist/terrarium.mpy :terrarium.mpy
+mpremote connect auto cp dist/index.html :index.html
+mpremote connect auto cp dist/index.html.gz :index.html.gz
+mpremote connect auto cp dist/icon.webp :icon.webp
+mpremote connect auto cp dist/favicon.ico :favicon.ico
+mpremote connect auto cp wifi.cfg :wifi.cfg
+mpremote connect auto reset
+```
+
+6. Reset the board. Once it's on WiFi, the log shows the address & IP.
+7. Open that address in a browser on the same network.
 
 ## Development
 
 Run `preview.py` with the environment active to preview the web locally.
 That serves the page at `http://127.0.0.1:8080/` with sample readings.
+
+For day-to-day board updates (build + copy everything in `dist/` except `wifi.cfg`, then reset):
+
+```bash
+python flash.py
+python flash.py COM5          # explicit port
+python flash.py --no-build    # copy current dist/ only
+```
 
 **Memory limit:** the board compiles `main.py` before any of it runs, and that compile needs one large free block. This doesn't leave enough memory for the WiFi. `python build.py` compiles the controller to `terrarium.mpy` on the PC and leaves the board a one-line `main.py`.
 
@@ -90,11 +115,13 @@ Explanations in `main.py` are `#` comments. A docstring is kept in memory for th
 | Event                              | Result                                                                 |
 | ---------------------------------- | ---------------------------------------------------------------------- |
 | WiFi not configured or can't connect | The fan and button still work. The board keeps retrying WiFi in the background, waiting longer between attempts, up to every 10 minutes. |
+| Network wedged while showing connected | The board probes the gateway every 5 minutes; recovers through web rebind, STA rejoin, interface bounce, then resets after 3 failed cycles. Logged in `events.log`. |
 | Errors inside the loop (less than 20)         | Logged and skipped; 20 consecutive errors reset the board                    |
 | Clock not synced yet               | Schedule stays off. The fan card says "Waiting for clock". On-demand still works. The board retries every minute. |
 | Inside a selected half-hour on a selected day | Fan runs until that stretch ends, or at midnight if the next day is off |
 | Humidity at or below the limit during a selected half-hour | Scheduled fan stops. It starts again in that stretch only after humidity rises above the limit plus the gate. On-demand runs still work. A missing reading does not flip the fan. |
 | Pause recording in Advanced | Temperature, humidity, and fan history stop. The chart shows that time in gray. The fan schedule keeps running, and the humidity limit is ignored until recording resumes. |
+| Daily reset (Advanced; default 03:00 on) | At that local time the board hard-resets. Turn it off or change the time in Advanced. Needs a synced clock; skipped for a few minutes after boot so a 03:00 reset does not loop. |
 | Selected 23:30 and 00:00, both days on | One run from 23:30 to 00:30                                       |
 | A day left off                     | The fan stays off that day. The next run is the next selected day.    |
 | Button or web button while fan on  | Fan stops for the rest of that stretch. A reboot can start it again.  |
@@ -110,9 +137,11 @@ Explanations in `main.py` are `#` comments. A docstring is kept in memory for th
 | `terrarium.mpy` | yes           | Compiled controller, written to `dist/` by `python build.py`. Copy this to the board next to the launcher. |
 | `index.html`   | yes            | The web page, streamed from flash.                                                                                     |
 | `index.html.gz` | yes           | Compressed copy of the page. `build.py` refreshes it. Served instead of `index.html` unless `index.html` is newer. |
+| `icon.webp`    | yes            | Brand mark next to the site title. Copied from `res/` by `build.py`. |
+| `favicon.ico`  | yes            | Browser tab icon. Generated from `res/icon.png`; copied by `build.py`. |
 | `wifi.cfg`     | yes            | WiFi credentials. Copy `wifi.cfg.example`, fill it in, and save it on the board as `wifi.cfg`.                         |
 | `schedule.cfg` | no             | Created when you save Ventilation from the web page. |
-| `settings.cfg` | no             | Sensor interval, log size, timezone, maintenance categories, and whether recording is paused. |
+| `settings.cfg` | no             | Sensor interval, log size, timezone, maintenance categories, recording pause, and daily reset. |
 | `events.log`   | no             | Rolling log of system status, warnings, and errors. |
 | `climate.hist` | no             | Temperature and humidity. |
 | `fan.hist`     | no             | Fan run times.                                      |
