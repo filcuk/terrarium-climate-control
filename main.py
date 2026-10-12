@@ -101,6 +101,12 @@ WIFI_RETRY_MAX_MS = 10 * MINUTE
 NET_HEALTH_MS = 5 * MINUTE
 NET_HEALTH_GRACE_MS = 2 * MINUTE
 NET_HEALTH_TIMEOUT_S = 2
+# After a failed probe: web restart, STA rejoin, then interface bounce.
+# Gaps let association settle before the next check. Three full cycles → reset.
+NET_RECOVER_GAP_MS = 30 * SECOND
+NET_RECOVER_BOUNCE_GAP_MS = 2 * MINUTE
+NET_RECOVER_MAX_CYCLES = 3
+NET_BOUNCE_OFF_MS = 500
 SEND_CHUNK = 1024
 
 # State Variables
@@ -135,6 +141,10 @@ wifi_attempt_at = 0
 wifi_retry_ms = WIFI_RETRY_MIN_MS
 net_joined_at = 0
 net_health_at = 0
+# -1 = normal probing; 0/1/2 = waiting after web / rejoin / bounce recovery.
+net_recover_step = -1
+net_recover_cycles = 0
+net_recover_at = 0
 device_ip = None
 hostname = None
 server = None
@@ -1402,17 +1412,10 @@ def log_memory():
     gc.mem_free(), gc.mem_alloc(), len(history), len(fan_runs), len(log_lines), len(maintenance)))
 
 
-def wifi_start(now):
-  global wlan, wifi_cfg, hostname
-  wifi_cfg = read_cfg(WIFI_CFG)
-  apply_zone(wifi_cfg)
-  if settings_timezone:
-    apply_settings_zone(settings_timezone)
-  if not wifi_cfg.get("ssid"):
-    log("WiFi: no %s with ssid=... found, web interface disabled." % WIFI_CFG)
-    return
+def wifi_set_hostname():
   # Hostname must be set before the interface comes up; the ESP32 port's mDNS
   # responder then answers for <hostname>.local
+  global hostname
   name = wifi_cfg.get("hostname", DEFAULT_HOSTNAME)
   hostname = None
   try:
@@ -1420,6 +1423,18 @@ def wifi_start(now):
     hostname = name
   except (ValueError, OSError):
     log("WiFi: could not set hostname '%s'; use the IP address instead." % name)
+
+
+def wifi_start(now):
+  global wlan, wifi_cfg
+  wifi_cfg = read_cfg(WIFI_CFG)
+  apply_zone(wifi_cfg)
+  if settings_timezone:
+    apply_settings_zone(settings_timezone)
+  if not wifi_cfg.get("ssid"):
+    log("WiFi: no %s with ssid=... found, web interface disabled." % WIFI_CFG)
+    return
+  wifi_set_hostname()
   gc.collect()
   try:
     wlan = network.WLAN(network.STA_IF)
@@ -1522,9 +1537,92 @@ def net_health_diag():
   log(" ".join(parts))
 
 
+def net_recover_run(now, step):
+  # 0 = rebind HTTP, 1 = STA rejoin, 2 = radio bounce + hostname (mDNS) refresh.
+  global wifi_connected
+  if step == 0:
+    log("Network: recovering (web)...")
+    web_stop()
+    if wlan.isconnected():
+      web_start()
+    return
+  if step == 1:
+    log("Network: recovering (rejoin)...")
+    web_stop()
+    wifi_connected = False
+    wifi_connect(now)
+    return
+  log("Network: recovering (bounce)...")
+  web_stop()
+  wifi_connected = False
+  try:
+    wlan.active(False)
+  except OSError:
+    pass
+  utime.sleep_ms(NET_BOUNCE_OFF_MS)
+  gc.collect()
+  wifi_set_hostname()
+  try:
+    wlan.active(True)
+  except OSError as e:
+    log("Network: bounce failed (%s)." % e)
+    return
+  wifi_connect(now)
+
+
+def net_recover_begin(now):
+  global net_recover_step, net_recover_at
+  net_recover_run(now, 0)
+  net_recover_step = 0
+  net_recover_at = now
+
+
+def net_recover_poll(now):
+  # After each recovery action, wait, re-probe, then escalate or reset.
+  global net_recover_step, net_recover_cycles, net_recover_at, net_health_at
+  gap = NET_RECOVER_BOUNCE_GAP_MS if net_recover_step == 2 else NET_RECOVER_GAP_MS
+  if utime.ticks_diff(now, net_recover_at) < gap:
+    return
+  if net_recover_step >= 1:
+    if not wlan.isconnected():
+      if utime.ticks_diff(now, net_recover_at) < gap + NET_HEALTH_GRACE_MS:
+        return
+    elif utime.ticks_diff(now, net_joined_at) < NET_HEALTH_GRACE_MS:
+      return
+  if net_health_ok():
+    names = ("web", "rejoin", "bounce")
+    log("Network: recovered after %s." % names[net_recover_step])
+    net_recover_step = -1
+    net_recover_cycles = 0
+    net_health_at = now
+    return
+  if net_recover_step == 0:
+    net_recover_run(now, 1)
+    net_recover_step = 1
+    net_recover_at = now
+    return
+  if net_recover_step == 1:
+    net_recover_run(now, 2)
+    net_recover_step = 2
+    net_recover_at = now
+    return
+  net_recover_cycles += 1
+  log("Network: recovery cycle %d/%d failed." % (net_recover_cycles, NET_RECOVER_MAX_CYCLES))
+  if net_recover_cycles >= NET_RECOVER_MAX_CYCLES:
+    log("Network: still unreachable; resetting.")
+    fan_pin.value(0)
+    machine.reset()
+  net_recover_run(now, 0)
+  net_recover_step = 0
+  net_recover_at = now
+
+
 def net_health_poll(now):
-  # Probe on a slow interval after join grace. Recovery is a later step.
+  # Probe on a slow interval after join grace; escalate when the path is dead.
   global net_health_at
+  if net_recover_step >= 0:
+    net_recover_poll(now)
+    return
   if utime.ticks_diff(now, net_joined_at) < NET_HEALTH_GRACE_MS:
     return
   if utime.ticks_diff(now, net_health_at) < NET_HEALTH_MS:
@@ -1532,6 +1630,7 @@ def net_health_poll(now):
   net_health_at = now
   if not net_health_ok():
     net_health_diag()
+    net_recover_begin(now)
 
 
 def wifi_poll(now):
@@ -1563,6 +1662,9 @@ def wifi_poll(now):
     log("WiFi: not connected yet, retrying (next retry in %s)." % fmt_duration(wifi_retry_ms))
     wifi_retry_ms = min(wifi_retry_ms * 2, WIFI_RETRY_MAX_MS)
     wifi_connect(now)
+  if net_recover_step >= 0 and not wifi_connected:
+    # Rejoin/bounce left us offline; keep the ladder moving on its gaps.
+    net_recover_poll(now)
 
 
 # ---------------------------------------------------------------- web
