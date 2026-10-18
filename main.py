@@ -170,6 +170,13 @@ HISTORY_LOAD_WAIT_MS = 30 * SECOND
 device_ip = None
 hostname = None
 server = None
+# #region agent log
+DBG_FILE = "dbg.ndjson"
+web_accepts = 0
+web_accept_errs = 0
+dbg_beat_at = 0
+DBG_BEAT_MS = 30 * SECOND
+# #endregion
 send_buf = bytearray(SEND_CHUNK)
 time_synced = False
 ntp_at = None  # ticks of the last sync attempt
@@ -558,6 +565,63 @@ def log(msg):
   # Let the file grow to 2x before trimming, so flash isn't rewritten on every line
   if log_file_lines > 2 * log_keep:
     rewrite_log_file()
+
+
+# #region agent log
+def dbg(hid, loc, msg, data=None):
+  # Compact NDJSON for pull_dbg.py → debug-0cf5c2.log. Keep payloads tiny.
+  try:
+    payload = {
+      "sessionId": "0cf5c2",
+      "hypothesisId": hid,
+      "location": loc,
+      "message": msg,
+      "data": data if data is not None else {},
+      "timestamp": utime.ticks_ms(),
+    }
+    line = json.dumps(payload)
+  except (TypeError, ValueError, MemoryError):
+    return
+  try:
+    with open(DBG_FILE, "a") as f:
+      f.write(line)
+      f.write("\n")
+  except OSError:
+    pass
+
+
+def dbg_idf_free():
+  try:
+    import esp32
+    info = esp32.idf_heap_info(esp32.HEAP_DATA)
+    free = 0
+    largest = 0
+    for region in info:
+      free += region[2]
+      if region[3] > largest:
+        largest = region[3]
+    return free, largest
+  except (ImportError, AttributeError, OSError, TypeError, MemoryError):
+    return -1, -1
+
+
+def dbg_snap(extra=None):
+  data = {
+    "server": 0 if server is None else 1,
+    "wifi": 1 if wifi_connected else 0,
+    "mem_free": gc.mem_free(),
+    "accepts": web_accepts,
+    "accept_errs": web_accept_errs,
+    "recover": net_recover_step,
+  }
+  idf_free, idf_largest = dbg_idf_free()
+  data["idf_free"] = idf_free
+  data["idf_largest"] = idf_largest
+  if extra:
+    for k, v in extra.items():
+      data[k] = v
+  return data
+# #endregion
 
 
 def purge_log():
@@ -1055,6 +1119,10 @@ def rewrite_history_file():
 
 
 def load_history():
+  # Do not rewrite the file here. Rebuilding every line peaks the MicroPython
+  # heap into IDF socket memory (idf_largest dropped to ~3KB after boot load),
+  # and new TCP accepts then fail while the listen socket still looks fine.
+  # Compaction is persisted on the next store/delete.
   global history_stored_at
   history[:] = []
   interval_s = max(1, sensor_interval_ms // SECOND)
@@ -1072,9 +1140,10 @@ def load_history():
     # Fold as we read so a per-minute file is never held whole
     if len(history) > HISTORY_HARD_CAP + 40:
       compact_history()
+      gc.collect()
   compact_history()
   history_stored_at = history[-1][0] if history else 0
-  rewrite_history_file()
+  gc.collect()
 
 
 def store_history_sample(t, h):
@@ -1099,10 +1168,13 @@ def rewrite_fan_runs_file():
 
 
 def load_fan_runs():
+  global fan_file_lines
   now_ts = utime.time()
   cutoff = now_ts - FAN_KEEP_S
   fan_runs[:] = []
+  seen = 0
   for line in read_lines(FAN_HISTORY_FILE):
+    seen += 1
     parts = line.split(",")
     if len(parts) < 2:
       continue
@@ -1118,7 +1190,12 @@ def load_fan_runs():
     if len(fan_runs) > FAN_RUNS_MAX:
       fan_runs.pop(0)
   trim_rows(fan_runs, 1, cutoff, FAN_RUNS_MAX)
-  rewrite_fan_runs_file()
+  # Skip rewrite when nothing expired — same IDF-heap reason as load_history.
+  if len(fan_runs) < seen:
+    rewrite_fan_runs_file()
+  else:
+    fan_file_lines = len(fan_runs)
+  gc.collect()
 
 
 def close_fan_run(now_ts):
@@ -1237,7 +1314,9 @@ def load_pauses():
   now_ts = utime.time()
   cutoff = now_ts - PAUSE_KEEP_S
   pauses[:] = []
+  seen = 0
   for line in read_lines(PAUSE_FILE):
+    seen += 1
     parts = line.split(",")
     if len(parts) < 2:
       continue
@@ -1252,7 +1331,9 @@ def load_pauses():
     if len(pauses) > PAUSE_MAX:
       pauses.pop(0)
   trim_rows(pauses, 1, cutoff, PAUSE_MAX)
-  rewrite_pauses_file()
+  if len(pauses) < seen:
+    rewrite_pauses_file()
+  gc.collect()
 
 
 def clear_pauses():
@@ -1406,7 +1487,9 @@ def load_maintenance():
   global maint_rev
   now_ts = utime.time()
   maintenance[:] = []
+  seen = 0
   for line in read_lines(MAINT_FILE):
+    seen += 1
     parts = line.split(",")
     if len(parts) < 2:
       continue
@@ -1423,8 +1506,10 @@ def load_maintenance():
     if len(maintenance) > MAINT_MAX:
       maintenance.pop(0)
   trim_rows(maintenance, 0, now_ts - MAINT_KEEP_S, MAINT_MAX)
-  rewrite_maintenance_file()
+  if len(maintenance) < seen:
+    rewrite_maintenance_file()
   maint_rev += 1
+  gc.collect()
 
 
 def record_maintenance(kind, text=""):
@@ -1667,23 +1752,41 @@ def net_health_ok():
   try:
     _ip, _mask, gw, _dns = wlan.ifconfig()
   except OSError:
+    # #region agent log
+    dbg("B", "main.py:net_health_ok", "ifconfig_fail", dbg_snap())
+    # #endregion
     return False
   if not gw or gw == "0.0.0.0":
+    # #region agent log
+    dbg("B", "main.py:net_health_ok", "no_gateway", dbg_snap({"gw": str(gw)}))
+    # #endregion
     return False
   s = None
   try:
     s = socket.socket()
     s.settimeout(NET_HEALTH_TIMEOUT_S)
     s.connect(socket.getaddrinfo(gw, 53)[0][-1])
+    # #region agent log
+    dbg("A", "main.py:net_health_ok", "probe_ok", dbg_snap({"gw": gw}))
+    # #endregion
     return True
   except OSError as e:
     # Refused/reset still means L3 works. Timeout means a dead path.
     code = e.args[0] if e.args else 0
     if code in (110, 116):
+      # #region agent log
+      dbg("B", "main.py:net_health_ok", "probe_timeout", dbg_snap({"code": code, "gw": gw}))
+      # #endregion
       return False
     msg = str(e).lower()
     if "timed out" in msg or "timeout" in msg:
+      # #region agent log
+      dbg("B", "main.py:net_health_ok", "probe_timeout_msg", dbg_snap({"gw": gw}))
+      # #endregion
       return False
+    # #region agent log
+    dbg("A", "main.py:net_health_ok", "probe_refuse_ok", dbg_snap({"code": code, "gw": gw}))
+    # #endregion
     return True
   finally:
     if s is not None:
@@ -1721,11 +1824,17 @@ def net_health_diag():
 def net_recover_run(now, step):
   # 0 = rebind HTTP, 1 = STA rejoin, 2 = radio bounce + hostname (mDNS) refresh.
   global wifi_connected
+  # #region agent log
+  dbg("B", "main.py:net_recover_run", "begin", dbg_snap({"step": step}))
+  # #endregion
   if step == 0:
     log("Network: recovering (web)...")
     web_stop()
     if wlan.isconnected():
       web_start()
+    # #region agent log
+    dbg("D", "main.py:net_recover_run", "after_web", dbg_snap({"step": 0}))
+    # #endregion
     return
   if step == 1:
     log("Network: recovering (rejoin)...")
@@ -1819,7 +1928,13 @@ def load_runtime_data():
   global history_loaded, mem_logged_at
   if history_loaded:
     return
+  # #region agent log
+  dbg("C", "main.py:load_runtime_data", "before_loads", dbg_snap())
+  # #endregion
   load_history()
+  # #region agent log
+  dbg("C", "main.py:load_runtime_data", "after_history", dbg_snap({"history": len(history)}))
+  # #endregion
   load_fan_runs()
   load_maintenance()
   load_pauses()
@@ -1848,13 +1963,24 @@ def wifi_poll(now):
         log("Web: also at http://%s.local/" % hostname)
       gc.collect()
       web_start()
+      # #region agent log
+      dbg("D", "main.py:wifi_poll", "joined_web", dbg_snap({"ip": device_ip}))
+      # #endregion
       load_runtime_data()
+      # #region agent log
+      dbg("C", "main.py:wifi_poll", "history_loaded", dbg_snap({
+        "history": len(history), "fan": len(fan_runs), "maint": len(maintenance),
+      }))
+      # #endregion
     else:
       net_health_poll(now)
   elif wifi_connected:
     wifi_connected = False
     # Drop the listen socket so the next join rebinds instead of keeping a stale one.
     web_stop()
+    # #region agent log
+    dbg("D", "main.py:wifi_poll", "wifi_lost", dbg_snap())
+    # #endregion
     log("WiFi: connection lost, reconnecting...")
     wifi_connect(now)
   elif utime.ticks_diff(now, wifi_attempt_at) >= wifi_retry_ms:
@@ -1891,8 +2017,14 @@ def web_start():
     s.listen(4)
     s.setblocking(False)
     server = s
+    # #region agent log
+    dbg("D", "main.py:web_start", "listen_ok", dbg_snap())
+    # #endregion
   except OSError as e:
     log("Web: could not start server: %s" % e)
+    # #region agent log
+    dbg("D", "main.py:web_start", "listen_fail", dbg_snap({"err": str(e)}))
+    # #endregion
 
 
 def send_head(conn, status_line, content_type, length, extra=""):
@@ -2175,17 +2307,50 @@ def handle(conn, method, path, qs, body, ctype, now):
 
 
 def web_poll(now):
+  global web_accepts, web_accept_errs
   if server is None:
     return
   try:
     conn, _ = server.accept()
-  except OSError:
+  except OSError as e:
+    code = e.args[0] if e.args else 0
+    # Non-blocking: EAGAIN/EWOULDBLOCK when idle. Anything else may mean wedged PCBs.
+    if code not in (11, 35, 116):
+      web_accept_errs += 1
+      # #region agent log
+      if web_accept_errs <= 5 or web_accept_errs % 50 == 0:
+        dbg("A", "main.py:web_poll", "accept_err", dbg_snap({"code": code}))
+      # #endregion
     return
+  web_accepts += 1
+  # #region agent log
+  if web_accepts <= 3 or web_accepts % 25 == 0:
+    path_hint = "?"
+    try:
+      conn.settimeout(1)
+      method, path, qs, body, ctype = read_request(conn)
+      path_hint = path
+      dbg("A", "main.py:web_poll", "accept_ok", dbg_snap({"path": path_hint, "n": web_accepts}))
+      handle(conn, method, path, qs, body, ctype, now)
+    except Exception as e:
+      dbg("E", "main.py:web_poll", "handle_err", dbg_snap({"err": str(e), "path": path_hint}))
+      try:
+        send(conn, "500 Internal Server Error", "text/plain", str(e))
+      except Exception:
+        pass
+    finally:
+      conn.close()
+      gc.collect()
+    return
+  # #endregion
   try:
     conn.settimeout(1)
     method, path, qs, body, ctype = read_request(conn)
     handle(conn, method, path, qs, body, ctype, now)
   except Exception as e:
+    # #region agent log
+    dbg("E", "main.py:web_poll", "handle_err", dbg_snap({"err": str(e)}))
+    # #endregion
     try:
       send(conn, "500 Internal Server Error", "text/plain", str(e))
     except Exception:
@@ -2214,6 +2379,17 @@ if btn_pin.value() == 0:
 load_settings()
 load_log()
 load_schedule()
+# #region agent log
+try:
+  with open(DBG_FILE, "w") as _dbg_f:
+    _dbg_f.write("")
+except OSError:
+  pass
+dbg("E", "main.py:boot", "boot", {
+  "cause": RESET_CAUSE_NAMES.get(machine.reset_cause(), machine.reset_cause()),
+  "mem_free": gc.mem_free(),
+})
+# #endregion
 if settings_tz_rejected:
   log("Settings timezone '%s' is not built in; keeping the wifi.cfg timezone." % settings_tz_rejected)
 
@@ -2246,10 +2422,17 @@ log("Controller ready.")
 # ---------------------------------------------------------------- main loop
 
 def control_step(now):
-  global manual_running, btn_blank_start, fan_was_active, mem_logged_at
+  global manual_running, btn_blank_start, fan_was_active, mem_logged_at, dbg_beat_at
 
   refresh_tz()
   wifi_poll(now)
+  # #region agent log
+  if dbg_beat_at == 0:
+    dbg_beat_at = now
+  elif utime.ticks_diff(now, dbg_beat_at) >= DBG_BEAT_MS:
+    dbg_beat_at = now
+    dbg("A", "main.py:control_step", "heartbeat", dbg_snap())
+  # #endregion
   # No wifi.cfg: load history after a short wait so the fan schedule still works.
   if (not history_loaded and wlan is None and
       utime.ticks_diff(now, boot_at) >= HISTORY_LOAD_WAIT_MS):
@@ -2299,6 +2482,9 @@ try:
     except Exception as e:
       errors += 1
       text = "%s: %s" % (type(e).__name__, e)
+      # #region agent log
+      dbg("E", "main.py:loop", "loop_error", dbg_snap({"n": errors, "err": text}))
+      # #endregion
       if text != last_error or utime.ticks_diff(now, error_logged_at) >= MINUTE:
         log("Loop error (%d in a row): %s" % (errors, text))
         last_error = text

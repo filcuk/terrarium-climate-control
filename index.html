@@ -295,12 +295,31 @@ function mark(p) { return p[3] > 0 ? '\u00d8 ' : ''; }
 // One in-flight request at a time — the C3 accepts slowly and parallel
 // history/log fetches were wedging WiFi into "Server Not Found".
 let netChain = Promise.resolve();
+// #region agent log
+let agentOk = 0;
+let agentFail = 0;
+function agentLog(hid, loc, msg, data) {
+  fetch('http://127.0.0.1:7589/ingest/f8daa1fb-2ec0-4d95-aa42-06499de7b524',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'0cf5c2'},body:JSON.stringify({sessionId:'0cf5c2',hypothesisId:hid,location:loc,message:msg,data:data||{},timestamp:Date.now()})}).catch(()=>{});
+}
+// #endregion
 function req(url, opts) {
   const job = async () => {
-    const r = await fetch(url, opts);
-    const t = await r.text();
-    if (!r.ok) throw new Error(t);
-    return t;
+    try {
+      const r = await fetch(url, opts);
+      const t = await r.text();
+      if (!r.ok) throw new Error(t);
+      // #region agent log
+      agentOk++;
+      if (agentOk <= 3 || agentOk % 20 === 0) agentLog('A', 'index.html:req', 'ok', {url, n: agentOk, fail: agentFail});
+      // #endregion
+      return t;
+    } catch (e) {
+      // #region agent log
+      agentFail++;
+      agentLog('A', 'index.html:req', 'fail', {url, n: agentFail, ok: agentOk, err: String(e && e.message || e)});
+      // #endregion
+      throw e;
+    }
   };
   const p = netChain.then(job, job);
   netChain = p.catch(() => {});
